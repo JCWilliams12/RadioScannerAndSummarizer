@@ -3,7 +3,7 @@ CC = gcc
 CXX = g++
 CFLAGS = -O2
 # Added pthread and boost flags for Crow
-CXXFLAGS = -std=c++17 -O2
+CXXFLAGS = -std=c++17 -O2 -I./include
 LIBS = -lpthread -lboost_system
 
 # The final executable name (Linux standard is usually just 'main')

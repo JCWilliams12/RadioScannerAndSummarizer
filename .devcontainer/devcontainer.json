@@ -1,0 +1,4 @@
+{
+    "image": "mcr.microsoft.com/devcontainers/cpp:1-ubuntu-22.04",
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y libboost-all-dev libasio-dev libsqlite3-dev"
+}
