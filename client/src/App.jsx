@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import './App.css'
 
 function App() {
@@ -14,6 +14,26 @@ function App() {
   const [selectedStation, setSelectedStation] = useState(null);
   const [selectedLog, setSelectedLog] = useState(null);
   const [logs, setLogs] = useState([]);
+
+  // For Playback function on DB page
+  const [showPlaybackMenu, setShowPlaybackMenu] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [volume, setVolume] = useState(50);
+  
+  // --- THE GLITCH FIX: Tracks if you are currently dragging the slider ---
+  const [isDragging, setIsDragging] = useState(false);
+  const [localAudioUrl, setLocalAudioUrl] = useState("");
+  const audioRef = useRef(null); 
+
+  // --- NEW: Helper function to format seconds into MM:SS ---
+  const formatTime = (timeInSeconds) => {
+    if (isNaN(timeInSeconds)) return "00:00";
+    const m = Math.floor(timeInSeconds / 60).toString().padStart(2, '0');
+    const s = Math.floor(timeInSeconds % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
 
   const fetchLogs = async () => {
     try {
@@ -40,16 +60,34 @@ function App() {
     fetchLogs(); 
   }, []);
 
+// --- THE FIX: Fetch audio as a Blob to allow perfect scrubbing ---
+useEffect(() => {
+  let objectUrl = "";
+
+  if (showPlaybackMenu && selectedLog) {
+    fetch("http://localhost:8080/whispertinytest/audio.wav")
+      .then(res => res.blob())
+      .then(blob => {
+        objectUrl = URL.createObjectURL(blob);
+        setLocalAudioUrl(objectUrl); // Feed the local blob to the audio player
+      })
+      .catch(err => console.error("Error fetching audio:", err));
+  }
+
+  return () => {
+    // Clean up the memory when the menu closes
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  };
+}, [showPlaybackMenu, selectedLog]);
+
   // --- THE NEW 2-STEP SCAN HANDLER ---
   const handleScan = async () => {
     if (!selectedStation) return;
 
-    // Reset UI for a new scan
     setActiveRawText("Transcribing audio from " + Number(selectedStation.freq).toFixed(3) + " MHz...");
     setActiveSummary("Waiting for transcription...");
 
     try {
-      // STEP 1: Ask C++ for the Whisper Transcription
       const transcribeRes = await fetch(`http://localhost:8080/api/transcribe`, {
         method: 'POST',
         body: JSON.stringify({ freq: parseFloat(selectedStation.freq) }),
@@ -58,12 +96,10 @@ function App() {
       if (!transcribeRes.ok) throw new Error("Transcription failed");
       const transcribeData = await transcribeRes.json();
       
-      // Update UI independently! (User can now read the raw text)
       const rawText = transcribeData.transcription;
       setActiveRawText(rawText);
       setActiveSummary("Generating AI Summary...");
 
-      // STEP 2: Ask C++ for the Ollama Summary based on that text
       const summaryRes = await fetch(`http://localhost:8080/api/summarize`, {
         method: 'POST',
         body: JSON.stringify({ text: rawText }),
@@ -72,7 +108,6 @@ function App() {
       if (!summaryRes.ok) throw new Error("Summarization failed");
       const summaryData = await summaryRes.json();
       
-      // Update UI independently! (Scan complete)
       setActiveSummary(summaryData.summary);
 
     } catch (error) {
@@ -95,8 +130,8 @@ function App() {
           freq: parseFloat(selectedStation.freq),
           time: Math.floor(Date.now() / 1000), 
           location: "Birmingham, AL", 
-          rawT: activeRawText, // <-- Now saves the actual Whisper text!
-          summary: activeSummary, // <-- Now saves the actual Ollama summary!
+          rawT: activeRawText,
+          summary: activeSummary, 
           channelName: selectedStation.name
         }),
       });
@@ -164,7 +199,7 @@ function App() {
           <button className="main-btn" onClick={() => setView('database')}>Database</button>
         </div>
       )}
-
+      
       {/* DATABASE VIEW */}
       {view === 'database' && (
         <div className="database-view-wrapper">
@@ -223,9 +258,112 @@ function App() {
                   <p className="summary-text">Select a log to view details</p>
                 )}
               </div>
-              <div className="action-buttons">
-                <button className="sub-btn scan-btn" disabled={!selectedLog}>Fetch</button>
-                <button className="sub-btn delete-btn" onClick={handleDelete} disabled={!selectedLog}>Delete</button>
+              <div className="action-buttons" style={{ position: 'relative' }}>
+                <button 
+                  className="sub-btn scan-btn" 
+                  onClick={() => setShowPlaybackMenu(!showPlaybackMenu)}
+                  disabled={!selectedLog}
+                >
+                  Playback
+                </button>
+                <button 
+                  className="sub-btn delete-btn" 
+                  onClick={handleDelete} 
+                  disabled={!selectedLog}
+                >
+                  Delete
+                </button>
+
+                {/* PLAYBACK POPUP MENU */}
+                {showPlaybackMenu && selectedLog && (
+                  <div className="playback-popup">
+                    
+                    {/* HIDDEN AUDIO ELEMENT */}
+                    <audio 
+                      ref={audioRef}
+                      src={localAudioUrl} /* <-- CHANGED THIS */
+                      onLoadedMetadata={(e) => setDuration(e.target.duration)}
+                      onTimeUpdate={(e) => {
+                        // FIX: Only update the slider if you are NOT dragging it
+                        if (!isDragging) {
+                          setCurrentTime(e.target.currentTime);
+                        }
+                      }}
+                      onEnded={() => {
+                        setIsPlaying(false);
+                        setCurrentTime(0); // Reset to start when finished
+                      }}
+                    />
+                    
+                    {/* PLAY/PAUSE CONTROLS */}
+                    <button 
+                      onClick={() => {
+                        if (!audioRef.current || !audioRef.current.src) return;
+                        if (isPlaying) audioRef.current.pause();
+                        else audioRef.current.play();
+                        setIsPlaying(!isPlaying);
+                      }}
+                      style={{
+                        padding: '8px',
+                        backgroundColor: '#004080',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontWeight: 'bold',
+                        marginBottom: '5px'
+                      }}
+                    >
+                      {isPlaying ? 'Pause' : 'Play'}
+                    </button>
+
+                    <div className="slider-group">
+                      <label>Timeline: {formatTime(currentTime)} / {formatTime(duration)}</label>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max={duration || 100} 
+                        step="0.01" 
+                        value={currentTime} 
+                        onMouseDown={() => setIsDragging(true)}   /* Stop fighting the mouse */
+                        onTouchStart={() => setIsDragging(true)}  /* Stop fighting the touch screen */
+                        onChange={(e) => {
+                          setCurrentTime(Number(e.target.value)); /* Update visual instantly */
+                        }}
+                        onMouseUp={(e) => {
+                          setIsDragging(false);
+                          if (audioRef.current) {
+                            audioRef.current.currentTime = Number(e.target.value); /* Actually move the audio */
+                          }
+                        }}
+                        onTouchEnd={(e) => {
+                          setIsDragging(false);
+                          if (audioRef.current) {
+                            audioRef.current.currentTime = Number(e.target.value);
+                          }
+                        }}
+                      />
+                    </div>
+                    
+                    <div className="slider-group">
+                      <label>Volume: {volume}%</label>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="100" 
+                        step="1"
+                        value={volume} 
+                        onChange={(e) => {
+                          const newVol = Number(e.target.value);
+                          setVolume(newVol);
+                          if (audioRef.current) {
+                            audioRef.current.volume = newVol / 100;
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -260,7 +398,6 @@ function App() {
             <div className="data-box">
               <h3>Transmission Summary</h3>
               <div className="summary-content">
-                {/* Fixed the target display below */}
                 <p className="summary-text">
                   {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
                 </p>
@@ -269,7 +406,7 @@ function App() {
                 {/* DISPLAY SUMMARY FIRST */}
                 <p className="summary-text"><strong>AI Summary:</strong> {activeSummary}</p>
                 
-                {/* DISPLAY RAW TEXT SECOND (Only shows up when it's not empty) */}
+                {/* DISPLAY RAW TEXT SECOND */}
                 {activeRawText && (
                   <>
                     <br/>
