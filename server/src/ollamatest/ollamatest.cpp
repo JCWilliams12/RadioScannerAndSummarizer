@@ -7,10 +7,13 @@ std::string GenerateSummary(std::string transcript) {
 
     try {
     
-    std::string prompt = "The following is a transcript from a radio broadcast. "
-                         "Place the transcript into typical radio broadcast categories "
-                         "(i.e. sports, music, religion, talkshow, etc.) then write a "
-                         "one to two sentence overview: " + transcript;
+    std::string prompt = "Analyze the following intercepted radio transcript. "
+                         "Categorize it using exactly one of these labels: "
+                         "[News, Sports, Music, Religion, Talk Radio, Emergency, Unknown]. "
+                         "Provide a strict 1-2 sentence summary of the core subject. "
+                         "Do not include conversational filler. Format your exact response like this: "
+                         "[Category] - [Summary].\n\n"
+                         "Transcript: " + transcript;
 
 
     ollama::response response = ollama::generate("phi3:mini", prompt);

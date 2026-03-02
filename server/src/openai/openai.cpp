@@ -102,8 +102,8 @@ std::string summarizeText(const std::string& transcript, const std::string& apiK
         json payload = {
             {"model", "gpt-4o-mini"},
             {"messages", {
-                {{"role", "system"}, {"content", "You are a specialized assistant that summarizes intercepted radio broadcasts. Provide a concise, bulleted summary of the key information."}},
-                {{"role", "user"}, {"content", "Please summarize this radio transcription:\n\n" + transcript}}
+                {{"role", "system"}, {"content", "You are an automated radio intelligence system. Analyze intercepted transcripts and categorize them using exactly one of these labels: [News, Sports, Music, Religion, Talk Radio, Emergency, Unknown]. Provide a strict 1-2 sentence summary of the core subject. Do not include conversational filler. You must format your exact response like this: [Category] - [Summary]."}},
+                {{"role", "user"}, {"content", "Transcript:\n\n" + transcript}}
             }}
         };
         std::string payloadStr = payload.dump();
