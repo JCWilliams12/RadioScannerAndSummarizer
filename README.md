@@ -21,6 +21,6 @@ sudo apt-get install -y libboost-all-dev
 
 -=-=-=-=-=-=-Run Front End-=-=-=-=-=-=-=-=-=-
 Paste the following into terminal: 
-cd radio-scanner
+cd client
 npm install
 npm run dev
