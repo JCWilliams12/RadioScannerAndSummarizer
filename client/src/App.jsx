@@ -34,6 +34,8 @@ function App() {
     const s = Math.floor(timeInSeconds % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   };
+// --- THE MISSING STATE ---
+const [useOpenAI, setUseOpenAI] = useState(false); // Set to true if we want ChatGPT as the default
 
   const fetchLogs = async () => {
     try {
