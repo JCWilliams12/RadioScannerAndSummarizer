@@ -8,6 +8,10 @@
 #include "crow.h"
 #include "ollamatest.hpp"
 #include "whispertinytest.hpp"
+
+//for audio playback 
+#include <fstream>
+#include <sstream>
 #include "openai.hpp"
 
 void openFrontEnd() {
@@ -162,6 +166,39 @@ void openFrontEnd() {
         return res;
     });
 
+
+// =======================================================
+    // ROUTE: SERVE AUDIO FILES TO REACT
+    // =======================================================
+    CROW_ROUTE(app, "/whispertinytest/<string>")
+    ([](std::string filename) {
+        
+        std::cout << "\n[AUDIO DEBUG] React requested file: " << filename << std::endl;
+
+        // Construct the file path
+        std::string file_path = "server/src/whispertinytest/" + filename; 
+
+        // Open the file
+        std::ifstream file(file_path, std::ios::binary);
+        if (!file) {
+            std::cout << "[AUDIO DEBUG] Failed to find: " << file_path << std::endl;
+            crow::response res(404);
+            res.add_header("Access-Control-Allow-Origin", "*");
+            return res;
+        }
+
+        // Read the file contents
+        std::ostringstream contents;
+        contents << file.rdbuf();
+        file.close();
+
+        // Send the file to React
+        crow::response res(contents.str());
+        res.set_header("Content-Type", "audio/wav");
+        res.add_header("Access-Control-Allow-Origin", "*");
+        return res;
+    });
+
     // =======================================================
     // SERVER STARTUP & ERROR HANDLING
     // =======================================================
@@ -175,8 +212,6 @@ void openFrontEnd() {
 
     curl_global_cleanup();
 }
-
-
 
 int main() {
     // Initialize DB table before starting server

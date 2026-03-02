@@ -294,3 +294,36 @@ p {
 .database-view-wrapper .scanning-grid {
   width: 100%;
 }
+/* --- PLAYBACK POPUP MENU --- */
+.playback-popup {
+  position: absolute;
+  bottom: calc(100% + 10px); /* Hovers cleanly above the button */
+  left: 0;
+  background-color: #ffffff; /* Crisp white */
+  border: 1px solid #ced4da; /* Light border matching data boxes */
+  border-radius: 8px;
+  padding: 15px;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); /* Soft shadow matching tables */
+  z-index: 10;
+}
+
+.slider-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #2b2b2b; /* Dark charcoal text */
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-align: left;
+}
+
+/* Custom styling for the range sliders */
+.slider-group input[type="range"] {
+  width: 100%;
+  cursor: pointer;
+  accent-color: #004080; /* Corporate Blue for the slider thumb/track */
+}
