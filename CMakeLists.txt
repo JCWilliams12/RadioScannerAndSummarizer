@@ -2,6 +2,7 @@
 project(AetherGuardServer)
 
 set(CMAKE_CXX_STANDARD 17)
+add_compile_definitions(NOMINMAX)
 
 # --- 0. DEPENDENCIES (Whisper.cpp) ---
 include(FetchContent)
@@ -20,6 +21,28 @@ set(WHISPER_BUILD_SERVER OFF CACHE BOOL "Disable whisper server" FORCE)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force static libraries" FORCE)
 FetchContent_MakeAvailable(whisper_cpp)
+
+# --- 0.5. DEPENDENCIES (libcurl from source) ---
+message(STATUS "Fetching libcurl...")
+FetchContent_Declare(
+    curl
+    GIT_REPOSITORY https://github.com/curl/curl.git
+    GIT_TAG        curl-8_6_0 # Use a stable release tag
+)
+
+# Force curl to build statically and disable unnecessary features
+set(BUILD_CURL_EXE OFF CACHE BOOL "Disable curl executable" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force static curl" FORCE)
+set(HTTP_ONLY ON CACHE BOOL "Only enable HTTP/HTTPS protocols" FORCE)
+
+# Use native OS crypto to avoid bundling OpenSSL
+if(WIN32)
+    set(CURL_USE_SCHANNEL ON CACHE BOOL "Use Windows native crypto" FORCE)
+else()
+    set(CURL_USE_OPENSSL ON CACHE BOOL "Use Linux native crypto" FORCE)
+endif()
+
+FetchContent_MakeAvailable(curl)
 
 # --- 1. MODEL DOWNLOADER (Updated to download into source folder) ---
 set(MODEL_FILENAME "ggml-base.en.bin")
@@ -57,8 +80,7 @@ include_directories(server/src/dbfunction/corefunction)
 include_directories(server/src/dbfunction/filterfunction)
 include_directories(server/src/iqwav2wav)
 include_directories(server/src/ollamatest)
-include_directories(server/src/openai/summarizer)
-include_directories(server/src/openai/transcriber)
+include_directories(server/src/openai)
 include_directories(server/src/sdr)
 include_directories(server/src/whispertinytest)
 
@@ -76,14 +98,34 @@ add_executable(server
 
 # --- 6. LINKING LOGIC ---
 if(WIN32)
-    target_link_libraries(server Threads::Threads Ws2_32 whisper)
+    target_link_libraries(server 
+        Threads::Threads 
+        Ws2_32 
+        Crypt32    # Required by libcurl SCHANNEL on Windows
+        Wldap32    # Required by libcurl on Windows
+        Normaliz   # Required by libcurl on Windows
+        whisper 
+        libcurl_static
+    )
 else()
-    target_link_libraries(server Threads::Threads dl whisper)
+    target_link_libraries(server 
+        Threads::Threads 
+        dl 
+        whisper 
+        libcurl_static
+    )
 endif()
 
 # --- 7. POST-BUILD ---
+# Define the path to your .env file in the root directory
+set(ENV_FILE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/.env")
+
 add_custom_command(TARGET server POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${MODEL_PATH}"
+    $<TARGET_FILE_DIR:server>
+    # Copies the .env file alongside the compiled executable
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${ENV_FILE_PATH}"
     $<TARGET_FILE_DIR:server>
 )

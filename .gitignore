@@ -26,3 +26,4 @@ server/src/whispertinytest/ggml-base.en.bin
 .vscode/
 .idea/
 *.swp
+*.env

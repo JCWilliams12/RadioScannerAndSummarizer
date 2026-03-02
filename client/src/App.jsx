@@ -15,6 +15,9 @@ function App() {
   const [selectedLog, setSelectedLog] = useState(null);
   const [logs, setLogs] = useState([]);
 
+  // --- NEW: Toggle State for API Routing ---
+  const [useOpenAI, setUseOpenAI] = useState(true);
+
   const fetchLogs = async () => {
     try {
       const res = await fetch('http://localhost:8080/api/logs'); 
@@ -44,13 +47,17 @@ function App() {
   const handleScan = async () => {
     if (!selectedStation) return;
 
+    // Determine the correct endpoints based on the toggle
+    const transcribeRoute = useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local';
+    const summarizeRoute = useOpenAI ? '/api/summarize/openai' : '/api/summarize/local';
+
     // Reset UI for a new scan
-    setActiveRawText("Transcribing audio from " + Number(selectedStation.freq).toFixed(3) + " MHz...");
+    setActiveRawText(`Transcribing audio from ${Number(selectedStation.freq).toFixed(3)} MHz via ${useOpenAI ? 'ChatGPT' : 'Local'}...`);
     setActiveSummary("Waiting for transcription...");
 
     try {
       // STEP 1: Ask C++ for the Whisper Transcription
-      const transcribeRes = await fetch(`http://localhost:8080/api/transcribe`, {
+      const transcribeRes = await fetch(`http://localhost:8080${transcribeRoute}`, {
         method: 'POST',
         body: JSON.stringify({ freq: parseFloat(selectedStation.freq) }),
       });
@@ -61,10 +68,10 @@ function App() {
       // Update UI independently! (User can now read the raw text)
       const rawText = transcribeData.transcription;
       setActiveRawText(rawText);
-      setActiveSummary("Generating AI Summary...");
+      setActiveSummary(`Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`);
 
       // STEP 2: Ask C++ for the Ollama Summary based on that text
-      const summaryRes = await fetch(`http://localhost:8080/api/summarize`, {
+      const summaryRes = await fetch(`http://localhost:8080${summarizeRoute}`, {
         method: 'POST',
         body: JSON.stringify({ text: rawText }),
       });
@@ -95,8 +102,8 @@ function App() {
           freq: parseFloat(selectedStation.freq),
           time: Math.floor(Date.now() / 1000), 
           location: "Birmingham, AL", 
-          rawT: activeRawText, // <-- Now saves the actual Whisper text!
-          summary: activeSummary, // <-- Now saves the actual Ollama summary!
+          rawT: activeRawText,
+          summary: activeSummary,
           channelName: selectedStation.name
         }),
       });
@@ -147,6 +154,29 @@ function App() {
 
   return (
     <div className="container">
+      
+      {/* NEW: Toggle Button anchored completely to the browser window */}
+      <button 
+        onClick={() => setUseOpenAI(!useOpenAI)}
+        style={{
+          position: 'fixed',    // Pins it to the browser viewport
+          top: '20px',
+          right: '20px',
+          zIndex: 1000,         // Ensures it stays on top of other elements
+          padding: '8px 16px',
+          backgroundColor: useOpenAI ? '#10a37f' : '#3b82f6',
+          color: 'white',
+          border: 'none',
+          borderRadius: '20px',
+          cursor: 'pointer',
+          fontWeight: 'bold',
+          transition: 'background-color 0.3s',
+          boxShadow: '0 4px 6px rgba(0,0,0,0.1)' // Small shadow for depth
+        }}
+      >
+        Mode: {useOpenAI ? "ChatGPT (Cloud)" : "Ollama (Local)"}
+      </button>
+
       {/* HEADER SECTION */}
       <header className="app-header">
         <h1 className="logo-text">AetherGuard</h1>
@@ -201,7 +231,7 @@ function App() {
                     <p className="summary-text"><strong>Frequency:</strong> {Number(selectedLog.freq).toFixed(3)} MHz</p>
                     <p className="summary-text"><strong>Location:</strong> {selectedLog.location}</p>
                     
-                    {/* NEW: Normal Time + Unix Time displayed together */}
+                    {/* Normal Time + Unix Time displayed together */}
                     <p className="summary-text">
                       <strong>Time:</strong> {selectedLog.time ? new Date(selectedLog.time * 1000).toLocaleString(undefined, {
                           month: 'short',
