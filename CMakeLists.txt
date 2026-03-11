@@ -14,11 +14,9 @@ FetchContent_Declare(
     GIT_TAG        master
 )
 
-# Disable whisper's internal build targets
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "Disable whisper tests" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "Disable whisper examples" FORCE)
 set(WHISPER_BUILD_SERVER OFF CACHE BOOL "Disable whisper server" FORCE)
-
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force static libraries" FORCE)
 FetchContent_MakeAvailable(whisper_cpp)
 
@@ -27,15 +25,13 @@ message(STATUS "Fetching libcurl...")
 FetchContent_Declare(
     curl
     GIT_REPOSITORY https://github.com/curl/curl.git
-    GIT_TAG        curl-8_6_0 # Use a stable release tag
+    GIT_TAG        curl-8_6_0 
 )
 
-# Force curl to build statically and disable unnecessary features
 set(BUILD_CURL_EXE OFF CACHE BOOL "Disable curl executable" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force static curl" FORCE)
 set(HTTP_ONLY ON CACHE BOOL "Only enable HTTP/HTTPS protocols" FORCE)
 
-# Use native OS crypto to avoid bundling OpenSSL
 if(WIN32)
     set(CURL_USE_SCHANNEL ON CACHE BOOL "Use Windows native crypto" FORCE)
 else()
@@ -44,27 +40,14 @@ endif()
 
 FetchContent_MakeAvailable(curl)
 
-# --- 1. MODEL DOWNLOADER (Updated to download into source folder) ---
+# --- 1. MODEL DOWNLOADER ---
 set(MODEL_FILENAME "ggml-base.en.bin")
 set(MODEL_URL "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${MODEL_FILENAME}")
-
-# TARGET PATH: Directly into your source code folder where the C++ code expects it
 set(MODEL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/server/src/whispertinytest/${MODEL_FILENAME}")
 
 if(NOT EXISTS "${MODEL_PATH}")
-    message(STATUS "Model not found. Downloading ${MODEL_FILENAME} to ${MODEL_PATH}...")
-    file(DOWNLOAD 
-        ${MODEL_URL} 
-        ${MODEL_PATH}
-        SHOW_PROGRESS
-        STATUS DOWNLOAD_STATUS
-    )
-    list(GET DOWNLOAD_STATUS 0 STATUS_CODE)
-    if(NOT STATUS_CODE EQUAL 0)
-        message(FATAL_ERROR "Failed to download model. Error: ${DOWNLOAD_STATUS}")
-    endif()
-else()
-    message(STATUS "Whisper model found: ${MODEL_PATH}")
+    message(STATUS "Model not found. Downloading to ${MODEL_PATH}...")
+    file(DOWNLOAD ${MODEL_URL} ${MODEL_PATH} SHOW_PROGRESS STATUS DOWNLOAD_STATUS)
 endif()
 
 # --- 2. COMPILER OPTIONS ---
@@ -72,22 +55,29 @@ if(MSVC)
     add_compile_options(/wd4267 /wd4244)
 endif()
 
-# --- 3. INCLUDE DIRECTORIES (Updated for Root Context) ---
-# All paths now have 'server/' prepended because this file sits in the root
+# --- 3. INCLUDE DIRECTORIES ---
+# Ensure SDR and Crow headers are accessible
 include_directories(server/include)
+include_directories(server/include/sdr)
 include_directories(server/src/db)
 include_directories(server/src/dbfunction/corefunction)
 include_directories(server/src/dbfunction/filterfunction)
 include_directories(server/src/iqwav2wav)
 include_directories(server/src/ollamatest)
 include_directories(server/src/openai)
-include_directories(server/src/sdr)
+include_directories(server/src/sdr) # Location of sdr_handler and iqtowav
 include_directories(server/src/whispertinytest)
+
+# SDRplay API header location 
+if(WIN32)
+    include_directories("C:/Program Files/SDRplay/API/inc")
+else()
+    include_directories("/usr/local/include")
+endif()
 
 find_package(Threads REQUIRED)
 
-# --- 4. FIND SOURCES (Updated for Root Context) ---
-# Looks for .cpp files inside server/src/
+# --- 4. FIND SOURCES ---
 file(GLOB_RECURSE APP_SOURCES "server/src/*.cpp")
 
 # --- 5. DEFINE EXECUTABLE ---
@@ -101,11 +91,12 @@ if(WIN32)
     target_link_libraries(server 
         Threads::Threads 
         Ws2_32 
-        Crypt32    # Required by libcurl SCHANNEL on Windows
-        Wldap32    # Required by libcurl on Windows
-        Normaliz   # Required by libcurl on Windows
+        Crypt32    
+        Wldap32    
+        Normaliz   
         whisper 
         libcurl_static
+        "C:/Program Files/SDRplay/API/x64/sdrplay_api.lib" # [cite: 1647, 1655]
     )
 else()
     target_link_libraries(server 
@@ -113,18 +104,26 @@ else()
         dl 
         whisper 
         libcurl_static
+        "sdrplay_api" # Links against /usr/local/lib/libsdrplay_api.so 
     )
 endif()
 
-# --- 7. POST-BUILD ---
-# Define the path to your .env file in the root directory
+if(WIN32)
+    # Copy the SDRplay DLL to the output directory [cite: 1655]
+    add_custom_command(TARGET server POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "C:/Program Files/SDRplay/API/x64/sdrplay_api.dll"
+        $<TARGET_FILE_DIR:server>
+    )
+endif()
+
+# --- 7. POST-BUILD (Environment and Models) ---
 set(ENV_FILE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/.env")
 
 add_custom_command(TARGET server POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${MODEL_PATH}"
     $<TARGET_FILE_DIR:server>
-    # Copies the .env file alongside the compiled executable
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${ENV_FILE_PATH}"
     $<TARGET_FILE_DIR:server>

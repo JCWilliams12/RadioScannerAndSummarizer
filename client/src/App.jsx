@@ -22,24 +22,34 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(50);
   
-  // --- THE GLITCH FIX: Tracks if you are currently dragging the slider ---
   const [isDragging, setIsDragging] = useState(false);
   const [localAudioUrl, setLocalAudioUrl] = useState("");
   const audioRef = useRef(null); 
 
-  // --- NEW: Helper function to format seconds into MM:SS ---
+  // WebSockets & Live Audio State
+  const [isListeningLive, setIsListeningLive] = useState(false);
+  const audioCtxRef = useRef(null);
+  const wsRef = useRef(null);
+
+  // --- FIX: Scheduler ref to queue audio chunks back-to-back ---
+  // Without this, all chunks fire at "now" causing rhythmic gaps/stuttering
+  const nextPlayTimeRef = useRef(0);
+
+  // Scanner State
+  const [isScanningBand, setIsScanningBand] = useState(false);
+
   const formatTime = (timeInSeconds) => {
     if (isNaN(timeInSeconds)) return "00:00";
     const m = Math.floor(timeInSeconds / 60).toString().padStart(2, '0');
     const s = Math.floor(timeInSeconds % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   };
-// --- THE MISSING STATE ---
-const [useOpenAI, setUseOpenAI] = useState(false); // Set to true if we want ChatGPT as the default
+
+  const [useOpenAI, setUseOpenAI] = useState(false);
 
   const fetchLogs = async () => {
     try {
-      const res = await fetch('http://localhost:8080/api/logs'); 
+      const res = await fetch('/api/logs'); 
       const data = await res.json();
       setLogs(data);
     } catch (err) {
@@ -49,7 +59,7 @@ const [useOpenAI, setUseOpenAI] = useState(false); // Set to true if we want Cha
 
   const fetchStations = async () => {
     try {
-      const res = await fetch('http://localhost:8080/stations');
+      const res = await fetch('/stations');
       const data = await res.json();
       setStations(data);
     } catch (err) {
@@ -62,66 +72,176 @@ const [useOpenAI, setUseOpenAI] = useState(false); // Set to true if we want Cha
     fetchLogs(); 
   }, []);
 
-// --- THE FIX: Fetch audio as a Blob to allow perfect scrubbing ---
-useEffect(() => {
-  let objectUrl = "";
-
-  if (showPlaybackMenu && selectedLog) {
-    fetch("http://localhost:8080/whispertinytest/audio.wav")
-      .then(res => res.blob())
-      .then(blob => {
-        objectUrl = URL.createObjectURL(blob);
-        setLocalAudioUrl(objectUrl); // Feed the local blob to the audio player
-      })
-      .catch(err => console.error("Error fetching audio:", err));
-  }
-
-  return () => {
-    // Clean up the memory when the menu closes
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  // WIDEBAND FM SPECTRUM SWEEP
+  const handleWidebandSweep = async () => {
+    setIsScanningBand(true);
+    setActiveSummary("Hardware: Performing 88-108 MHz sweep...");
+    try {
+      const res = await fetch('/api/scan/wideband');
+      const data = await res.json();
+      
+      setStations(data.stations.map((s, index) => ({
+        id: `found-${index}`,
+        name: s.name,
+        freq: s.freq.toString()
+      })));
+      
+      setActiveSummary(`Sweep complete. Found ${data.stations.length} stations.`);
+    } catch (err) {
+      console.error("Sweep failed:", err);
+      setActiveSummary("Hardware error during spectrum sweep.");
+    } finally {
+      setIsScanningBand(false);
+    }
   };
-}, [showPlaybackMenu, selectedLog]);
 
-  // --- THE NEW 2-STEP SCAN HANDLER ---
+  // LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
+  useEffect(() => {
+    if (isListeningLive && selectedStation) {
+      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+
+      // Reset the scheduler so the first chunk plays immediately
+      nextPlayTimeRef.current = 0;
+      
+      wsRef.current = new WebSocket(`ws://${window.location.host}/ws/audio`);
+      wsRef.current.binaryType = 'arraybuffer';
+
+      wsRef.current.onmessage = (event) => {
+        if (!audioCtxRef.current) return;
+        
+        const pcm16 = new Int16Array(event.data);
+        const audioBuffer = audioCtxRef.current.createBuffer(1, pcm16.length, 16000);
+        const channelData = audioBuffer.getChannelData(0);
+        for (let i = 0; i < pcm16.length; i++) {
+          channelData[i] = pcm16[i] / 32768.0; 
+        }
+
+        const source = audioCtxRef.current.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioCtxRef.current.destination);
+
+        // --- FIX: Schedule chunks back-to-back using a running clock ---
+        // source.start() with no args stacks all chunks at "now", causing
+        // rhythmic gaps as they fight over the same playback position.
+        const currentTime = audioCtxRef.current.currentTime;
+        if (nextPlayTimeRef.current < currentTime) {
+          // Fell behind (underrun) - re-sync with a small 50ms buffer
+          nextPlayTimeRef.current = currentTime + 0.05;
+        }
+        source.start(nextPlayTimeRef.current);
+        nextPlayTimeRef.current += audioBuffer.duration;
+      };
+
+      fetch('/api/scan/tune', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ freq: parseFloat(selectedStation.freq) })
+      }).catch(err => console.error("Hardware tuning error:", err));
+      
+    } else {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close();
+        audioCtxRef.current = null;
+      }
+    }
+
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+      if (audioCtxRef.current) audioCtxRef.current.close();
+    };
+  }, [isListeningLive, selectedStation]);
+
+  // Fetch audio as a Blob to allow perfect scrubbing
+  useEffect(() => {
+    let objectUrl = "";
+
+    if (showPlaybackMenu && selectedLog) {
+      // Vite now proxies /whispertinytest to the C++ server
+      fetch("/whispertinytest/audio.wav")
+        .then(res => res.blob())
+        .then(blob => {
+          objectUrl = URL.createObjectURL(blob);
+          setLocalAudioUrl(objectUrl);
+        })
+        .catch(err => console.error("Error fetching audio:", err));
+    }
+
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [showPlaybackMenu, selectedLog]);
+
+  // THE 3-STEP SCAN HANDLER (Record -> Transcribe -> Summarize)
   const handleScan = async () => {
     if (!selectedStation) return;
 
-    // Determine the correct endpoints based on the toggle
     const transcribeRoute = useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local';
     const summarizeRoute = useOpenAI ? '/api/summarize/openai' : '/api/summarize/local';
 
-    // Reset UI for a new scan
-    setActiveRawText(`Transcribing audio from ${Number(selectedStation.freq).toFixed(3)} MHz via ${useOpenAI ? 'ChatGPT' : 'Local'}...`);
-    setActiveSummary("Waiting for transcription...");
+    setActiveSummary("Hardware: Recording 30-second capture...");
+    setActiveRawText(`Capturing audio from ${Number(selectedStation.freq).toFixed(3)} MHz...`);
 
     try {
-      // STEP 1: Ask C++ for the Whisper Transcription
-      const transcribeRes = await fetch(`http://localhost:8080${transcribeRoute}`, {
+      // STEP 0: Trigger the 30-second hardware record in C++
+      const recordRes = await fetch('/api/scan/record', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ freq: parseFloat(selectedStation.freq) })
+      });
+
+      // Validate the actual JSON payload, not just HTTP status
+      let recordData = null;
+      try {
+        recordData = await recordRes.json();
+      } catch {
+        throw new Error(`Record endpoint returned non-JSON (status: ${recordRes.status}). Check server console.`);
+      }
+
+      console.log("[Debug] Record response:", recordRes.status, recordData);
+
+      if (!recordRes.ok || recordData?.status !== "recording_started") {
+        throw new Error(`Recording failed. Status: ${recordRes.status}, Body: ${JSON.stringify(recordData)}`);
+      }
+
+      // Wait for the background C++ thread to finish writing the .wav file
+      setActiveSummary("Hardware: Background recording in progress (30s)...");
+      await new Promise(resolve => setTimeout(resolve, 31000)); 
+
+      setActiveSummary("AI: Processing transcription...");
+
+      // STEP 1: Whisper Transcription
+      const transcribeRes = await fetch(transcribeRoute, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ freq: parseFloat(selectedStation.freq) }),
       });
 
-      if (!transcribeRes.ok) throw new Error("Transcription failed");
+      if (!transcribeRes.ok) throw new Error(`Transcription failed (${transcribeRes.status}) - is the local transcription route implemented in C++?`);
       const transcribeData = await transcribeRes.json();
       
       const rawText = transcribeData.transcription;
       setActiveRawText(rawText);
       setActiveSummary(`Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`);
 
-      // STEP 2: Ask C++ for the Ollama Summary based on that text
-      const summaryRes = await fetch(`http://localhost:8080${summarizeRoute}`, {
+      // STEP 2: Summarization
+      const summaryRes = await fetch(summarizeRoute, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: rawText }),
       });
 
-      if (!summaryRes.ok) throw new Error("Summarization failed");
+      if (!summaryRes.ok) throw new Error(`Summarization failed (${summaryRes.status}) - is the local summarize route implemented in C++?`);
       const summaryData = await summaryRes.json();
       
       setActiveSummary(summaryData.summary);
 
     } catch (error) {
       console.error("Scan error:", error);
-      setActiveSummary("Error during scan process.");
+      setActiveSummary(`Error: ${error.message}`);
       setActiveRawText("Scan failed. Check server console.");
     }
   };
@@ -133,8 +253,9 @@ useEffect(() => {
     }
 
     try {
-      const response = await fetch(`http://localhost:8080/api/logs/save`, {
+      const response = await fetch('/api/logs/save', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           freq: parseFloat(selectedStation.freq),
           time: Math.floor(Date.now() / 1000), 
@@ -160,8 +281,9 @@ useEffect(() => {
   const handleDelete = async () => {
     if (selectedLog && window.confirm(`Delete log for ${selectedLog.name}?`)) {
       try {
-        const response = await fetch(`http://localhost:8080/api/logs/delete`, {
+        const response = await fetch('/api/logs/delete', {
           method: 'POST', 
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             freq: parseFloat(selectedLog.freq), 
             time: selectedLog.time,
@@ -186,20 +308,21 @@ useEffect(() => {
     setSelectedLog(null);
     setActiveSummary("Waiting for scan...");
     setActiveRawText("");
+    setIsListeningLive(false);
     setView('home');
   };
 
   return (
     <div className="container">
       
-      {/* NEW: Toggle Button anchored completely to the browser window */}
+      {/* Toggle Button anchored to the browser window */}
       <button 
         onClick={() => setUseOpenAI(!useOpenAI)}
         style={{
-          position: 'fixed',    // Pins it to the browser viewport
+          position: 'fixed',
           top: '20px',
           right: '20px',
-          zIndex: 1000,         // Ensures it stays on top of other elements
+          zIndex: 1000,
           padding: '8px 16px',
           backgroundColor: useOpenAI ? '#10a37f' : '#3b82f6',
           color: 'white',
@@ -208,7 +331,7 @@ useEffect(() => {
           cursor: 'pointer',
           fontWeight: 'bold',
           transition: 'background-color 0.3s',
-          boxShadow: '0 4px 6px rgba(0,0,0,0.1)' // Small shadow for depth
+          boxShadow: '0 4px 6px rgba(0,0,0,0.1)'
         }}
       >
         Mode: {useOpenAI ? "ChatGPT (Cloud)" : "Ollama (Local)"}
@@ -267,18 +390,11 @@ useEffect(() => {
                     <p className="summary-text"><strong>Station:</strong> {selectedLog.name}</p>
                     <p className="summary-text"><strong>Frequency:</strong> {Number(selectedLog.freq).toFixed(3)} MHz</p>
                     <p className="summary-text"><strong>Location:</strong> {selectedLog.location}</p>
-                    
-                    {/* Normal Time + Unix Time displayed together */}
                     <p className="summary-text">
                       <strong>Time:</strong> {selectedLog.time ? new Date(selectedLog.time * 1000).toLocaleString(undefined, {
-                          month: 'short',
-                          day: 'numeric',
-                          year: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit'
+                          month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit'
                       }) : "Unknown"} <span style={{ fontSize: "0.85em", color: "#aaa" }}>(Unix: {selectedLog.time})</span>
                     </p>
-                    
                     <hr style={{ borderColor: '#333', margin: '10px 0' }} />
                     <p className="summary-text"><strong>AI Summary:</strong> {selectedLog.summary || "No summary available"}</p>
                     <br/>
@@ -309,25 +425,19 @@ useEffect(() => {
                 {/* PLAYBACK POPUP MENU */}
                 {showPlaybackMenu && selectedLog && (
                   <div className="playback-popup">
-                    
-                    {/* HIDDEN AUDIO ELEMENT */}
                     <audio 
                       ref={audioRef}
-                      src={localAudioUrl} /* <-- CHANGED THIS */
+                      src={localAudioUrl}
                       onLoadedMetadata={(e) => setDuration(e.target.duration)}
                       onTimeUpdate={(e) => {
-                        // FIX: Only update the slider if you are NOT dragging it
-                        if (!isDragging) {
-                          setCurrentTime(e.target.currentTime);
-                        }
+                        if (!isDragging) setCurrentTime(e.target.currentTime);
                       }}
                       onEnded={() => {
                         setIsPlaying(false);
-                        setCurrentTime(0); // Reset to start when finished
+                        setCurrentTime(0);
                       }}
                     />
                     
-                    {/* PLAY/PAUSE CONTROLS */}
                     <button 
                       onClick={() => {
                         if (!audioRef.current || !audioRef.current.src) return;
@@ -357,22 +467,16 @@ useEffect(() => {
                         max={duration || 100} 
                         step="0.01" 
                         value={currentTime} 
-                        onMouseDown={() => setIsDragging(true)}   /* Stop fighting the mouse */
-                        onTouchStart={() => setIsDragging(true)}  /* Stop fighting the touch screen */
-                        onChange={(e) => {
-                          setCurrentTime(Number(e.target.value)); /* Update visual instantly */
-                        }}
+                        onMouseDown={() => setIsDragging(true)}
+                        onTouchStart={() => setIsDragging(true)}
+                        onChange={(e) => setCurrentTime(Number(e.target.value))}
                         onMouseUp={(e) => {
                           setIsDragging(false);
-                          if (audioRef.current) {
-                            audioRef.current.currentTime = Number(e.target.value); /* Actually move the audio */
-                          }
+                          if (audioRef.current) audioRef.current.currentTime = Number(e.target.value);
                         }}
                         onTouchEnd={(e) => {
                           setIsDragging(false);
-                          if (audioRef.current) {
-                            audioRef.current.currentTime = Number(e.target.value);
-                          }
+                          if (audioRef.current) audioRef.current.currentTime = Number(e.target.value);
                         }}
                       />
                     </div>
@@ -388,9 +492,7 @@ useEffect(() => {
                         onChange={(e) => {
                           const newVol = Number(e.target.value);
                           setVolume(newVol);
-                          if (audioRef.current) {
-                            audioRef.current.volume = newVol / 100;
-                          }
+                          if (audioRef.current) audioRef.current.volume = newVol / 100;
                         }}
                       />
                     </div>
@@ -410,12 +512,25 @@ useEffect(() => {
         <div className="scanning-container">
           <div className="scanning-grid">
             <div className="data-box">
-              <h3>Live Frequencies</h3>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h3>Live Frequencies</h3>
+                <button 
+                  className="sub-btn" 
+                  onClick={handleWidebandSweep}
+                  disabled={isScanningBand}
+                  style={{ fontSize: '0.7em', padding: '5px 10px' }}
+                >
+                  {isScanningBand ? "Scanning..." : "Find Stations"}
+                </button>
+              </div>
               <ul className="frequency-list">
                 {stations.map(s => (
                   <li 
                     key={s.id}
-                    onClick={() => setSelectedStation(s)}
+                    onClick={() => {
+                      setSelectedStation(s);
+                      setIsListeningLive(false);
+                    }}
                     className={selectedStation?.id === s.id ? "active-station" : ""}
                   >
                     <div className="station-item-content">
@@ -434,11 +549,7 @@ useEffect(() => {
                   {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
                 </p>
                 <hr style={{ borderColor: '#333', margin: '10px 0' }} />
-                
-                {/* DISPLAY SUMMARY FIRST */}
                 <p className="summary-text"><strong>AI Summary:</strong> {activeSummary}</p>
-                
-                {/* DISPLAY RAW TEXT SECOND */}
                 {activeRawText && (
                   <>
                     <br/>
@@ -447,9 +558,16 @@ useEffect(() => {
                     </p>
                   </>
                 )}
-
               </div>
               <div className="action-buttons">
+                <button 
+                  className="sub-btn" 
+                  style={{ backgroundColor: isListeningLive ? '#e74c3c' : '#f39c12' }}
+                  onClick={() => setIsListeningLive(!isListeningLive)} 
+                  disabled={!selectedStation}
+                >
+                  {isListeningLive ? "Stop Live Audio" : "Listen Live"}
+                </button>
                 <button className="sub-btn scan-btn" onClick={handleScan} disabled={!selectedStation}>Scan</button>
                 <button className="sub-btn save-btn" onClick={handleSave} disabled={!selectedStation}>Save</button>
               </div>
