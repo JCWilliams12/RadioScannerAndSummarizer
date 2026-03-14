@@ -361,7 +361,7 @@ void openFrontEnd(SdrHandler* sdr) {
     // =======================================================
     CROW_ROUTE(app, "/api/transcribe/openai").methods(crow::HTTPMethod::Post)
     ([apiKey](const crow::request& req) {
-        std::string text = transcribeAudio("server/src/whispertinytest/audio.wav", apiKey);
+        std::string text = transcribeAudio("server/src/AudioFile/audio.wav", apiKey);
         crow::json::wvalue response;
         response["transcription"] = text;
         crow::response res(response);
@@ -386,7 +386,7 @@ void openFrontEnd(SdrHandler* sdr) {
     CROW_ROUTE(app, "/api/transcribe/local").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         std::string model_path = "server/src/whispertinytest/ggml-base.en.bin";
-        std::string wav_path   = "server/src/whispertinytest/audio.wav";
+        std::string wav_path   = "server/src/AudioFile/audio.wav";
 
         WhisperTest transcriber(model_path);
         std::string text = transcriber.transcribe(wav_path);
