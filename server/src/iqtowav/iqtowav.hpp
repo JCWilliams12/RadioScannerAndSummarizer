@@ -35,5 +35,6 @@ private:
     float de_state = 0.0f;       
     float audioAccum = 0.0f;     
     int decimationCounter = 0;
-    
+    float i_state = 0.0f;
+    float q_state = 0.0f;
 };

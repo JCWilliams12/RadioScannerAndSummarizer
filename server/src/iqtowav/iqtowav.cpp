@@ -55,16 +55,22 @@ void IqToWav::ProcessBlock(short *xi, short *xq, unsigned int numSamples) {
 
     const float aa_alpha = 0.05f;    
     const float de_alpha = 0.4545f;  
-
-    // THE FIX: Lower the gain to match AudioFile's -1.0 to 1.0 format
-    // 4.25 perfectly scales a standard 75kHz FM broadcast to max volume
     const float FM_GAIN = 4.25f; 
+    
+    // Low-Pass Filter constant for a 200kHz channel at 2.0 MSPS
+    const float iq_alpha = 0.2f; 
 
     for (unsigned int i = 0; i < numSamples; i++) {
         float bb_i = static_cast<float>(xi[i]);
         float bb_q = static_cast<float>(xq[i]);
 
-        float current_phase = std::atan2(bb_q, bb_i);
+        // THE FIX: Digital Channel Filter
+        // Strips away the 1.3 MHz of adjacent static BEFORE the FM math
+        i_state = (iq_alpha * bb_i) + ((1.0f - iq_alpha) * i_state);
+        q_state = (iq_alpha * bb_q) + ((1.0f - iq_alpha) * q_state);
+
+        // Calculate phase using the FILTERED radio waves, not the raw ones
+        float current_phase = std::atan2(q_state, i_state);
         float phase_diff = current_phase - prev_phase;
 
         if (phase_diff >  M_PI) phase_diff -= 2.0f * M_PI;
@@ -97,6 +103,10 @@ void IqToWav::ProcessBlock(short *xi, short *xq, unsigned int numSamples) {
 
             // PATH 2: Convert to 16-bit integer for the Live WebSockets
             float live_int = pristine_float * 32767.0f;
+
+            if (live_int >  32767.0f) live_int =  32767.0f;
+            if (live_int < -32768.0f) live_int = -32768.0f;
+            
             liveAudioBuffer.push_back(static_cast<int16_t>(live_int));
 
             audioAccum = 0.0f;
