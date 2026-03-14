@@ -65,7 +65,7 @@ bool SdrHandler::StartStream(double startFreqHz) {
 
     // 1. Update DSP Module: 2.0 MHz input, decimate by 40, 0.0 offset (Because IF is Zero)
     // Pass the target sample rate (16000) directly instead of the decimation factor
-    dspModule = new IqToWav(2000000, 16000, "server/src/whispertinytest/audio.wav");
+    dspModule = new IqToWav(2000000, 16000, "server/src/AudioFile/audio.wav");
 
     // 2. Update Hardware Sample Rate to 2.0 MHz
     deviceParams->devParams->fsFreq.fsHz = 2000000.0;
