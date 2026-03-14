@@ -104,7 +104,10 @@ else()
         dl 
         whisper 
         libcurl_static
-        "sdrplay_api" # Links against /usr/local/lib/libsdrplay_api.so 
+        "/Library/SDRplayAPI/3.15.1/lib/libsdrplay_api.so.3.15" 
+        "/usr/local/lib/libsdrplay_api.dylib"
+        "/usr/local/lib/libsdrplay_api.so.3"
+        # Links against /usr/local/lib/libsdrplay_api.so 
     )
 endif()
 
