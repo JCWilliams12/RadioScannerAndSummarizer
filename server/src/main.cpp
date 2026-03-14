@@ -169,9 +169,7 @@ void openFrontEnd(SdrHandler* sdr) {
     // ROUTE: GET AVAILABLE STATIONS
     // =======================================================
     CROW_ROUTE(app, "/stations")([]() {
-        crow::json::wvalue station1 = {{"id", 1}, {"name", "City Police Dispatch"}, {"freq", "154.500"}};
-        crow::json::wvalue station2 = {{"id", 2}, {"name", "Aviation Emergency"}, {"freq", "121.500"}};
-        std::vector<crow::json::wvalue> station_list = {station1, station2};
+        std::vector<crow::json::wvalue> station_list;
         crow::json::wvalue json_data(station_list);
         crow::response res(json_data);
         res.add_header("Access-Control-Allow-Origin", "*");
