@@ -6,9 +6,16 @@ function App() {
   const [view, setView] = useState('home');
   const [stations, setStations] = useState([]);
   
-  // SEPARATED states for live scanning
-  const [activeSummary, setActiveSummary] = useState("Waiting for scan...");
-  const [activeRawText, setActiveRawText] = useState(""); 
+  // NEW: Dictionary to track scan jobs by frequency (solves the dropped call bug)
+  const [scanJobs, setScanJobs] = useState({});
+
+  // Helper function to safely update a specific frequency's background job
+  const updateJob = (freq, updates) => {
+    setScanJobs(prevJobs => ({
+      ...prevJobs,
+      [freq]: { ...(prevJobs[freq] || {}), ...updates }
+    }));
+  };
   
   // Selection states for each view
   const [selectedStation, setSelectedStation] = useState(null);
@@ -75,7 +82,7 @@ function App() {
   // WIDEBAND FM SPECTRUM SWEEP
   const handleWidebandSweep = async () => {
     setIsScanningBand(true);
-    setActiveSummary("Hardware: Performing 88-108 MHz sweep...");
+    console.log("Hardware: Performing 88-108 MHz sweep...");
     try {
       const res = await fetch('/api/scan/wideband');
       const data = await res.json();
@@ -86,10 +93,10 @@ function App() {
         freq: s.freq.toString()
       })));
       
-      setActiveSummary(`Sweep complete. Found ${data.stations.length} stations.`);
+      console.log(`Sweep complete. Found ${data.stations.length} stations.`);
     } catch (err) {
       console.error("Sweep failed:", err);
-      setActiveSummary("Hardware error during spectrum sweep.");
+      alert("Hardware error during spectrum sweep.");
     } finally {
       setIsScanningBand(false);
     }
@@ -179,21 +186,25 @@ function App() {
   const handleScan = async () => {
     if (!selectedStation) return;
 
+    // Lock in targetFreq so the background process doesn't get lost
+    const targetFreq = selectedStation.freq;
     const transcribeRoute = useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local';
     const summarizeRoute = useOpenAI ? '/api/summarize/openai' : '/api/summarize/local';
 
-    setActiveSummary("Hardware: Recording 30-second capture...");
-    setActiveRawText(`Capturing audio from ${Number(selectedStation.freq).toFixed(3)} MHz...`);
+    updateJob(targetFreq, { 
+      status: "recording",
+      summary: "Hardware: Recording 30-second capture...",
+      rawText: `Capturing audio from ${Number(targetFreq).toFixed(3)} MHz...`
+    });
 
     try {
       // STEP 0: Trigger the 30-second hardware record in C++
       const recordRes = await fetch('/api/scan/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ freq: parseFloat(selectedStation.freq) })
+        body: JSON.stringify({ freq: parseFloat(targetFreq) })
       });
 
-      // Validate the actual JSON payload, not just HTTP status
       let recordData = null;
       try {
         recordData = await recordRes.json();
@@ -208,24 +219,26 @@ function App() {
       }
 
       // Wait for the background C++ thread to finish writing the .wav file
-      setActiveSummary("Hardware: Background recording in progress (30s)...");
+      updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
       await new Promise(resolve => setTimeout(resolve, 31000)); 
 
-      setActiveSummary("AI: Processing transcription...");
+      updateJob(targetFreq, { summary: "AI: Processing transcription..." });
 
       // STEP 1: Whisper Transcription
       const transcribeRes = await fetch(transcribeRoute, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ freq: parseFloat(selectedStation.freq) }),
+        body: JSON.stringify({ freq: parseFloat(targetFreq) }),
       });
 
-      if (!transcribeRes.ok) throw new Error(`Transcription failed (${transcribeRes.status}) - is the local transcription route implemented in C++?`);
+      if (!transcribeRes.ok) throw new Error(`Transcription failed (${transcribeRes.status})`);
       const transcribeData = await transcribeRes.json();
       
       const rawText = transcribeData.transcription;
-      setActiveRawText(rawText);
-      setActiveSummary(`Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`);
+      updateJob(targetFreq, { 
+        rawText: rawText,
+        summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
+      });
 
       // STEP 2: Summarization
       const summaryRes = await fetch(summarizeRoute, {
@@ -234,15 +247,21 @@ function App() {
         body: JSON.stringify({ text: rawText }),
       });
 
-      if (!summaryRes.ok) throw new Error(`Summarization failed (${summaryRes.status}) - is the local summarize route implemented in C++?`);
+      if (!summaryRes.ok) throw new Error(`Summarization failed (${summaryRes.status})`);
       const summaryData = await summaryRes.json();
       
-      setActiveSummary(summaryData.summary);
+      updateJob(targetFreq, { 
+        status: "complete",
+        summary: summaryData.summary 
+      });
 
     } catch (error) {
-      console.error("Scan error:", error);
-      setActiveSummary(`Error: ${error.message}`);
-      setActiveRawText("Scan failed. Check server console.");
+      console.error(`Scan error on ${targetFreq}:`, error);
+      updateJob(targetFreq, { 
+        status: "error",
+        summary: `Error: ${error.message}`,
+        rawText: "Scan failed. Check server console."
+      });
     }
   };
 
@@ -252,16 +271,24 @@ function App() {
       return;
     }
 
+    const targetFreq = selectedStation.freq;
+    const jobData = scanJobs[targetFreq];
+
+    if (!jobData || jobData.status !== "complete") {
+      alert("Please wait for the scan to finish before saving!");
+      return;
+    }
+
     try {
       const response = await fetch('/api/logs/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          freq: parseFloat(selectedStation.freq),
+          freq: parseFloat(targetFreq),
           time: Math.floor(Date.now() / 1000), 
           location: "Birmingham, AL", 
-          rawT: activeRawText,
-          summary: activeSummary,
+          rawT: jobData.rawText,       // Pulling directly from queue
+          summary: jobData.summary,    // Pulling directly from queue
           channelName: selectedStation.name
         }),
       });
@@ -306,11 +333,14 @@ function App() {
   const resetView = () => {
     setSelectedStation(null);
     setSelectedLog(null);
-    setActiveSummary("Waiting for scan...");
-    setActiveRawText("");
     setIsListeningLive(false);
     setView('home');
   };
+
+  // UI DERIVATIONS (Extracting the current job status for the UI dynamically)
+  const currentJob = selectedStation ? scanJobs[selectedStation.freq] : null;
+  const displaySummary = currentJob ? currentJob.summary : (isScanningBand ? "Hardware: Performing 88-108 MHz sweep..." : "Waiting for scan...");
+  const displayRawText = currentJob ? currentJob.rawText : "";
 
   return (
     <div className="container">
@@ -549,12 +579,16 @@ function App() {
                   {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
                 </p>
                 <hr style={{ borderColor: '#333', margin: '10px 0' }} />
-                <p className="summary-text"><strong>AI Summary:</strong> {activeSummary}</p>
-                {activeRawText && (
+                
+                {/* Dynamically loading the summary text for the specific station selected */}
+                <p className="summary-text"><strong>AI Summary:</strong> {displaySummary}</p>
+                
+                {/* Dynamically loading the raw text for the specific station selected */}
+                {displayRawText && (
                   <>
                     <br/>
                     <p className="summary-text" style={{ fontSize: "0.85em", color: "#bbb" }}>
-                      <em>Raw Text: {activeRawText}</em>
+                      <em>Raw Text: {displayRawText}</em>
                     </p>
                   </>
                 )}
