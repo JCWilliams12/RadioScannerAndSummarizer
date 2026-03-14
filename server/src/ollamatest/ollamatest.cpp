@@ -9,7 +9,7 @@ std::string GenerateSummary(std::string transcript) {
     
     std::string prompt = "Analyze the following intercepted radio transcript. "
                          "Categorize it using exactly one of these labels: "
-                         "[News, Sports, Music, Religion, Talk Radio, Emergency, Unknown]. "
+                         "[News, Sports, Music, Religion, Talk Radio, Emergency, Advertisement, Unknown]. "
                          "Provide a strict 1-2 sentence summary of the core subject. "
                          "Do not include conversational filler. Format your exact response like this: "
                          "[Category] - [Summary].\n\n"
