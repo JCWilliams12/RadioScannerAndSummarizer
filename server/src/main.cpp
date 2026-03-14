@@ -78,7 +78,9 @@ void openFrontEnd(SdrHandler* sdr) {
     } else {
         std::cerr << "CRITICAL ERROR: OPENAI_API_KEY not found in .env file!" << std::endl;
     }
-
+    // create DB 
+    createTable();
+    
     // =======================================================
     // WEBSOCKET ROUTE: LIVE AUDIO STREAM
     // =======================================================
