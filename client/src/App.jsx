@@ -791,13 +791,13 @@ function App() {
                     </p>
                     <hr style={{ borderColor: '#333', margin: '10px 0' }} />
                     
-                    <p className="summary-text"><strong>AI Summary:</strong> {activeSummary}</p>
-                    
-                    {activeRawText && (
+                    <p className="summary-text"><strong>AI Summary:</strong> {displaySummary}</p>
+
+                    {displayRawText && (
                       <>
                         <br/>
                         <p className="summary-text" style={{ fontSize: "0.85em", color: "#bbb" }}>
-                          <em>Raw Text: {activeRawText}</em>
+                          <em>Raw Text: {displayRawText}</em>
                         </p>
                       </>
                     )}
