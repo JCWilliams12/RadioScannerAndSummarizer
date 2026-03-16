@@ -47,10 +47,11 @@ crow::response makeCorsPreflightResponse() {
 
 // =======================================================
 // BANDWIDTH SWITCH HELPER
+// Scan mode:  BW_0_200 + IF_0_450 — isolates individual FM channels
+// Live mode:  BW_1_536 + IF_1_620 — full wideband for best audio quality
+// Must pass BOTH BwType AND IfType update flags or hardware ignores one.
 // =======================================================
-void setBandwidth(SdrHandler* sdr, sdrplay_api_Bw_MHzT bw, sdrplay_api_If_kHzT ifMode, bool isMock) {
-    if (isMock) return; // Bypass hardware call in Mock Mode
-
+void setBandwidth(SdrHandler* sdr, sdrplay_api_Bw_MHzT bw, sdrplay_api_If_kHzT ifMode) {
     sdrplay_api_DeviceParamsT* params = nullptr;
     sdrplay_api_GetDeviceParams(sdr->getDeviceHandle()->dev, &params);
     if (!params || !params->rxChannelA) return;
@@ -65,8 +66,7 @@ void setBandwidth(SdrHandler* sdr, sdrplay_api_Bw_MHzT bw, sdrplay_api_If_kHzT i
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 }
 
-// Passed the isMock flag into the frontend setup
-void openFrontEnd(SdrHandler* sdr, bool isMock) {
+void openFrontEnd(SdrHandler* sdr) {
 
     crow::SimpleApp app;
 
@@ -78,13 +78,9 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
     } else {
         std::cerr << "CRITICAL ERROR: OPENAI_API_KEY not found in .env file!" << std::endl;
     }
-
-<<<<<<< HEAD
-    // Call your DB init function here!
-    // initializeDatabase(); 
-
-=======
->>>>>>> parent of bb08b56 (initialized the database)
+    // create DB 
+    createTable();
+    
     // =======================================================
     // WEBSOCKET ROUTE: LIVE AUDIO STREAM
     // =======================================================
@@ -135,7 +131,7 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
     // =======================================================
     CROW_ROUTE(app, "/api/scan/record")
     .methods(crow::HTTPMethod::Post)
-    ([&sdr, isMock](const crow::request& req) { // Captured isMock
+    ([&sdr](const crow::request& req) {
         auto json_data = crow::json::load(req.body);
         if (!json_data) {
             std::cerr << "[Record] Failed to parse JSON body!" << std::endl;
@@ -147,17 +143,18 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
         double targetFreq = json_data["freq"].d();
         std::cout << "[Hardware] Async Record Request for " << targetFreq << " MHz" << std::endl;
 
-        std::thread([sdr, targetFreq, isMock]() {
-            if (isMock) {
-                std::cout << "[Mock] Simulating 30-second recording sequence..." << std::endl;
-                std::this_thread::sleep_for(std::chrono::seconds(30));
-                std::cout << "[Mock] Recording complete. Ready for AI." << std::endl;
-                return;
-            }
+        std::thread([sdr, targetFreq]() {
+            // Guarantee wideband mode is active before recording.
+            // If a sweep ran recently, hardware may still be settling
+            // from BW_0_200/IF_0_450 back to BW_1_536/IF_1_620.
+            // The IqToWav demodulator expects IF_1_620 — wrong IF = silence.
+            setBandwidth(sdr, sdrplay_api_BW_1_536, sdrplay_api_IF_Zero);
 
-            setBandwidth(sdr, sdrplay_api_BW_1_536, sdrplay_api_IF_Zero, isMock);
             sdr->TuneFrequency(targetFreq * 1000000.0);
+
+            // 500ms settle: PLL lock (50ms) + IF filter settle (150ms) + margin
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
             sdr->dspModule->StartRecording();
             std::this_thread::sleep_for(std::chrono::seconds(30));
             sdr->dspModule->StopRecording();
@@ -185,26 +182,16 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
     // ROUTE: WIDEBAND SPECTRUM SCANNER (88.0 - 108.0 MHz)
     // =======================================================
     CROW_ROUTE(app, "/api/scan/wideband")
-    ([&sdr, isMock]() { // Captured isMock
-        if (isMock) {
-            std::cout << "[Mock] Returning dummy station data for Wideband Sweep." << std::endl;
-            std::vector<crow::json::wvalue> mock_stations = {
-                {{"freq", 89.9}, {"name", "Mock FM 89.9"}},
-                {{"freq", 101.1}, {"name", "Mock FM 101.1"}},
-                {{"freq", 107.5}, {"name", "Mock FM 107.5"}}
-            };
-            crow::json::wvalue res;
-            res["stations"] = std::move(mock_stations);
-            crow::response response(res);
-            response.add_header("Access-Control-Allow-Origin", "*");
-            return response;
-        }
-
+    ([&sdr]() {
         std::vector<crow::json::wvalue> found_stations;
 
+        // Switch to narrow bandwidth for accurate per-channel power readings.
+        // BW_0_200 + IF_0_450 is the valid RSPdx combo — IF_1_620 caused
+        // ~0.2 MHz frequency offset, IF_Zero caused DC spike corruption.
         std::cout << "[Scanner] Switching to narrow bandwidth (200 kHz / IF_0_450)..." << std::endl;
-        setBandwidth(sdr, sdrplay_api_BW_0_200, sdrplay_api_IF_0_450, isMock);
+        setBandwidth(sdr, sdrplay_api_BW_0_200, sdrplay_api_IF_0_450);
 
+        // Disable AGC so gain doesn't compensate for static during sweep
         sdrplay_api_DeviceParamsT* params = nullptr;
         sdrplay_api_GetDeviceParams(sdr->getDeviceHandle()->dev, &params);
         if (params && params->rxChannelA) {
@@ -216,57 +203,84 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
+        // Calibrate noise floor on dead air
         sdr->TuneFrequency(87.9 * 1000000.0);
         sdr->ClearPowerHistory();
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         float noiseFloor = sdr->GetCurrentPower();
         float squelchThreshold = noiseFloor + 12.0f;
 
+        std::cout << "[Scanner] Noise Floor: " << noiseFloor << " dBFS" << std::endl;
+        std::cout << "[Scanner] Squelch: " << squelchThreshold << " dBFS" << std::endl;
+
         double bestFreq     = 0.0;
         float  bestRssi     = -999.0f;
         bool   inCluster    = false;
         int    clusterSteps = 0;
 
+        // 1. Scan by 0.2 MHz on the odd decimal
         for (double freqMHz = 88.1; freqMHz <= 107.9; freqMHz += 0.1) {
             sdr->TuneFrequency(freqMHz * 1000000.0);
+            
+            // 1. Give the hardware PLL 40ms to lock onto the new frequency
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
             sdr->ClearPowerHistory();
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            sdr->ClearPowerHistory();
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            
+            // 2. Accumulate exactly 40ms of clean RF data to prevent -100 dBFS empty buffers
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
 
             float currentRssi = sdr->GetCurrentPower();
-            
+            std::cout << "[Sweep] " << freqMHz << " MHz -> " << currentRssi << " dBFS" << std::endl;
+
+            // --- THE CLUSTER LOGIC ---
             if (currentRssi >= squelchThreshold) {
                 inCluster = true;
                 clusterSteps++;
-                if (currentRssi > bestRssi) {
-                    bestRssi = currentRssi;
-                    bestFreq = freqMHz;
+                
+                // THE FCC FIX: Only allow odd decimal frequencies to become the 'bestFreq'
+                int freq10 = static_cast<int>(std::round(freqMHz * 10.0));
+                if (freq10 % 2 != 0) { // If it is an odd decimal (e.g., 102.5)
+                    if (currentRssi > bestRssi) {
+                        bestRssi = currentRssi;
+                        bestFreq = freqMHz;
+                    }
                 }
             } else {
                 if (inCluster) {
-                    if (clusterSteps >= 2) {
+                    // Check if we actually found a valid odd-frequency peak inside the cluster
+                    if (clusterSteps >= 2 && bestFreq > 0.0) {
                         crow::json::wvalue station;
                         station["freq"] = bestFreq;
                         station["name"] = "FM Station " + std::to_string(bestFreq).substr(0, 5);
                         found_stations.push_back(std::move(station));
+                        
+                        std::cout << "[Scanner] STATION LOGGED: " << bestFreq 
+                                  << " MHz | Peak: " << bestRssi 
+                                  << " dBFS | Width: " << clusterSteps << " steps" << std::endl;
+                    } else {
+                        std::cout << "[Scanner] Rejected noise spike at " << freqMHz 
+                                  << " MHz (" << clusterSteps << " step)" << std::endl;
                     }
+                    
                     inCluster    = false;
                     bestRssi     = -999.0f;
+                    bestFreq     = 0.0;
                     clusterSteps = 0;
                 }
             }
         }
 
-        if (inCluster && clusterSteps >= 2) {
+        if (inCluster && clusterSteps >= 2 && bestFreq > 0.0) {
             crow::json::wvalue station;
             station["freq"] = bestFreq;
             station["name"] = "FM Station " + std::to_string(bestFreq).substr(0, 5);
             found_stations.push_back(std::move(station));
+            std::cout << "[Scanner] STATION LOGGED: " << bestFreq << " MHz (End of Band)" << std::endl;
         }
 
+        // Restore wideband mode for live audio and recording
         std::cout << "[Scanner] Restoring wideband mode (1.536 MHz / IF_Zero)..." << std::endl;
-        setBandwidth(sdr, sdrplay_api_BW_1_536, sdrplay_api_IF_Zero, isMock);
+        setBandwidth(sdr, sdrplay_api_BW_1_536, sdrplay_api_IF_Zero);
 
         sdrplay_api_DeviceParamsT* restoreParams = nullptr;
         sdrplay_api_GetDeviceParams(sdr->getDeviceHandle()->dev, &restoreParams);
@@ -276,6 +290,8 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
                 sdrplay_api_Update_Ctrl_Agc,
                 sdrplay_api_Update_Ext1_None);
         }
+
+        std::cout << "[Scanner] Sweep complete. Found " << found_stations.size() << " stations." << std::endl;
 
         crow::json::wvalue res;
         res["stations"] = std::move(found_stations);
@@ -288,16 +304,16 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
     // ROUTE: DYNAMIC HARDWARE TUNING
     // =======================================================
     CROW_ROUTE(app, "/api/scan/tune").methods(crow::HTTPMethod::Post)
-    ([&sdr, isMock](const crow::request& req) { // Captured isMock
+    ([&sdr](const crow::request& req) {
         auto x = crow::json::load(req.body);
         if (!x) return crow::response(400, "Bad JSON");
 
         double freqMHz = x.has("freq") ? x["freq"].d() : 0.0;
         double freqHz  = freqMHz * 1000000.0;
 
-        std::cout << "[Hardware] Tuning to: " << freqMHz << " MHz" << std::endl;
+        std::cout << "[Hardware] Tuning RSPdx to: " << freqMHz << " MHz" << std::endl;
 
-        if (isMock || sdr->TuneFrequency(freqHz)) { // Bypass hardware tuning if mocked
+        if (sdr->TuneFrequency(freqHz)) {
             crow::response res(200);
             res.add_header("Access-Control-Allow-Origin", "*");
             return res;
@@ -309,7 +325,7 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
     });
 
     // =======================================================
-    // ROUTE: DATABASE LOG MANAGEMENT ts just adds the test data for db 
+    // ROUTE: DATABASE LOG MANAGEMENT
     // =======================================================
     CROW_ROUTE(app, "/api/logs")([]() {
         std::vector<RadioLog> logs = getAllLogs();
@@ -341,7 +357,7 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
         res.add_header("Access-Control-Allow-Origin", "*");
         return res;
     });
-    //Mock data is inserted here 
+
     CROW_ROUTE(app, "/api/logs/save").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto x = crow::json::load(req.body);
@@ -412,11 +428,11 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
     // =======================================================
     // ROUTE: SERVE AUDIO FILES TO REACT
     // =======================================================
-    CROW_ROUTE(app, "/api/audio/<string>")
+    CROW_ROUTE(app, "/whispertinytest/<string>")
     ([](std::string filename) {
         std::cout << "[Audio] React requested: " << filename << std::endl;
 
-        std::string file_path = "server/src/AudioFile/" + filename;
+        std::string file_path = "server/src/whispertinytest/" + filename;
         std::ifstream file(file_path, std::ios::binary);
 
         if (!file) {
@@ -451,24 +467,22 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
 
 int main() {
     SdrHandler sdr;
-    bool isMock = false;
 
     std::cout << "Starting AetherGuard SDR System..." << std::endl;
 
     if (!sdr.InitializeAPI()) {
-        std::cerr << "[WARNING] Hardware initialization failed! Booting in MOCK MODE." << std::endl;
-        isMock = true; // Engage Mock Mode instead of crashing
-    } else if (!sdr.StartStream(154500000.0)) {
+        std::cerr << "Hardware initialization failed." << std::endl;
+        return 1;
+    }
+
+    if (!sdr.StartStream(154500000.0)) {
         std::cerr << "Stream start failed." << std::endl;
         sdr.ShutdownSDR();
         return 1;
     }
 
-    openFrontEnd(&sdr, isMock);
+    openFrontEnd(&sdr);
 
-    if (!isMock) {
-        sdr.ShutdownSDR();
-    }
-    
+    sdr.ShutdownSDR();
     return 0;
 }
