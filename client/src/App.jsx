@@ -1,5 +1,61 @@
 import { useState, useEffect, useRef } from 'react'
 import './App.css'
+import AetherGuardLogo from './assets/AetherGuardLogo.png'
+import { motion } from "framer-motion"
+
+// For logo animation
+const HeaderLogo = () => {
+  const waveVariants = {
+    initial: {scale: 0.8, opacity: 0},
+    hover: (i) => ({
+      scale: 4.5,
+      opacity: 0,
+      transition: {
+        duration: 1.5,
+        repeat: Infinity,
+        delay: i * 0.5,
+        ease: "easeOut",
+      },
+    }),
+  };
+  return (
+    <motion.div
+      className = "logo-container"
+      initial="inital"
+      whileHover="hover"
+      style={{
+        position: 'relative',
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        cursor: 'pointer'
+      }}
+    >
+      {[0, 1, 2].map((i) => (
+        <motion.div
+          key={i}
+          custom={i}
+          variants={waveVariants}
+          style={{
+            position: "absolute",
+            top: "33.5%",
+            left: "90%",
+            width: "10px", 
+            height: "10px",
+            borderRadius: "100 0 0 0",
+            border: "5px solid #002b5e", // Radio-blue color
+            rotate: 110,
+            zIndex: 0,
+          }}
+        />
+      ))}
+      <img 
+        src={AetherGuardLogo} alt="AetherGuard Logo" className="logo" 
+        style={{ position: 'relative', zIndex: 1 }}
+      />
+    </motion.div>
+  );
+};
 
 function App() {
   // State Management
@@ -120,7 +176,7 @@ useEffect(() => {
       setActiveSummary(summaryData.summary);
 
     } catch (error) {
-      console.error("Scan error:", error);
+      console.error("Scan error:", error); 
       setActiveSummary("Error during scan process.");
       setActiveRawText("Scan failed. Check server console.");
     }
@@ -216,6 +272,7 @@ useEffect(() => {
 
       {/* HEADER SECTION */}
       <header className="app-header">
+        <HeaderLogo /> 
         <h1 className="logo-text">AetherGuard</h1>
         <p className="slogan">Radio Intelligence, Refined.</p>
         <div className="sponsor-tag">
