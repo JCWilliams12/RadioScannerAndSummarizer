@@ -1,34 +1,121 @@
-#include "ollama.hpp"
 #include "ollamatest.hpp"
+#include "llama.h"
 #include <string>
 #include <iostream>
+#include <vector>
+#include <mutex>
+
+// THE FIX: Remove the global g_ctx. We only keep the heavy model global.
+static llama_model* g_model = nullptr;
+static std::mutex g_llama_mutex;
 
 std::string GenerateSummary(std::string transcript) {
+    std::lock_guard<std::mutex> lock(g_llama_mutex); 
 
     try {
-    
-    std::string prompt = "Analyze the following intercepted radio transcript. "
-                         "Categorize it using exactly one of these labels: "
-                         "[News, Sports, Music, Religion, Talk Radio, Emergency, Unknown]. "
-                         "Provide a strict 1-2 sentence summary of the core subject. "
-                         "Do not include conversational filler. Format your exact response like this: "
-                         "[Category] - [Summary].\n\n"
-                         "Transcript: " + transcript;
+        if (!g_model) {
+            std::cout << "\n[AI] Initializing local Phi-3 Mini engine..." << std::endl;
+            llama_backend_init();
+            
+            llama_model_params model_params = llama_model_default_params();
+            g_model = llama_load_model_from_file("server/src/ollamatest/Phi-3-mini-4k-instruct-q4.gguf", model_params);
+            
+            if (!g_model) {
+                return "[Error] Failed to load Phi-3 model.";
+            }
+        }
 
+        // THE FIX: Spawn a fresh, completely empty Context for every request. 
+        // This takes < 5ms and eliminates the need to manually clear the KV cache!
+        llama_context_params ctx_params = llama_context_default_params();
+        ctx_params.n_ctx = 2048; 
+        llama_context* ctx = llama_new_context_with_model(g_model, ctx_params);
 
-    ollama::response response = ollama::generate("phi3:mini", prompt);
+        const llama_vocab* vocab = llama_model_get_vocab(g_model);
 
+        std::string full_prompt = 
+            "<|user|>\n"
+            "Analyze the following intercepted radio transcript. "
+            "Categorize it using exactly one of these labels: "
+            "[News, Sports, Music, Religion, Talk Radio, Emergency, Advertisement, Unknown]. "
+            "Provide a strict 1-2 sentence summary of the core subject. "
+            "Do not include conversational filler. Format your exact response like this: "
+            "[Category] - [Summary].\n\n"
+            "Transcript: " + transcript + "<|end|>\n<|assistant|>\n";
 
-    std::stringstream ss;
-    ss << response;
-    
-    return ss.str();
-    
-} catch (const std::exception& e) {
-    std::cerr << "\n[CRITICAL ERROR] Ollama failed: " << e.what() << std::endl;
-} catch (...) {
-    std::cerr << "\n[CRITICAL ERROR] Unknown failure occurred." << std::endl;
-}
+        std::vector<llama_token> tokens_list(full_prompt.length() + 8);
+        
+        int n_tokens = llama_tokenize(vocab, full_prompt.c_str(), full_prompt.length(), tokens_list.data(), tokens_list.size(), true, true);
+        if (n_tokens < 0) {
+            tokens_list.resize(-n_tokens);
+            n_tokens = llama_tokenize(vocab, full_prompt.c_str(), full_prompt.length(), tokens_list.data(), tokens_list.size(), true, true);
+        }
+        tokens_list.resize(n_tokens);
 
-    
+        llama_batch batch = llama_batch_init(2048, 0, 1);
+        for (size_t i = 0; i < tokens_list.size(); i++) {
+            batch.token[batch.n_tokens] = tokens_list[i];
+            batch.pos[batch.n_tokens] = i;
+            batch.n_seq_id[batch.n_tokens] = 1;
+            batch.seq_id[batch.n_tokens][0] = 0;
+            batch.logits[batch.n_tokens] = false;
+            batch.n_tokens++;
+        }
+        batch.logits[batch.n_tokens - 1] = true; 
+
+        if (llama_decode(ctx, batch) != 0) {
+            llama_batch_free(batch);
+            llama_free(ctx); // Prevent memory leak on crash
+            return "[Error] Engine decode failed.";
+        }
+
+        std::string result = "";
+        int n_cur = batch.n_tokens;
+
+        while (n_cur <= 2048) {
+            auto n_vocab_size = llama_vocab_n_tokens(vocab);
+            auto * logits = llama_get_logits_ith(ctx, batch.n_tokens - 1);
+
+            llama_token new_token_id = 0;
+            float max_logit = -1e9;
+            for (int i = 0; i < n_vocab_size; i++) {
+                if (logits[i] > max_logit) {
+                    max_logit = logits[i];
+                    new_token_id = i;
+                }
+            }
+
+            if (llama_token_is_eog(vocab, new_token_id)) {
+                break;
+            }
+
+            char buf[128] = {0};
+            int n_chars = llama_token_to_piece(vocab, new_token_id, buf, sizeof(buf), 0, true);
+            if (n_chars > 0) {
+                result += std::string(buf, n_chars);
+            }
+
+            batch.n_tokens = 0; 
+            batch.token[0] = new_token_id;
+            batch.pos[0] = n_cur;
+            batch.n_seq_id[0] = 1;
+            batch.seq_id[0][0] = 0;
+            batch.logits[0] = true;
+            batch.n_tokens = 1;
+
+            if (llama_decode(ctx, batch) != 0) {
+                break;
+            }
+            n_cur++;
+        }
+
+        // THE FIX: Clean up the batch and destroy the context to free the RAM
+        llama_batch_free(batch);
+        llama_free(ctx);
+        
+        return result;
+
+    } catch (...) {
+        return "[Error] Unknown AI Exception.";
+    }
 }

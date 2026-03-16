@@ -6,6 +6,9 @@ Windows:
     cmake --build build
     .\build\Debug\server.exe
     
+    cmake --build build --config Release
+    .\build\Release\server.exe
+
 Linux:
     brew install cmake
     from root:
