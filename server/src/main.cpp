@@ -79,9 +79,12 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
         std::cerr << "CRITICAL ERROR: OPENAI_API_KEY not found in .env file!" << std::endl;
     }
 
+<<<<<<< HEAD
     // Call your DB init function here!
     // initializeDatabase(); 
 
+=======
+>>>>>>> parent of bb08b56 (initialized the database)
     // =======================================================
     // WEBSOCKET ROUTE: LIVE AUDIO STREAM
     // =======================================================
