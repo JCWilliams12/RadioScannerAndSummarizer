@@ -1,56 +1,157 @@
 import { useState, useEffect, useRef } from 'react'
 import './App.css'
 import AetherGuardLogo from './assets/AetherGuardLogo.png'
-import { motion } from "framer-motion"
+import { motion, AnimatePresence } from "framer-motion"
+
+// Progress bar keyframes
+const progressKeyframes = `
+  @keyframes progressShimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+  @keyframes statusPulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+  }
+`;
+ 
+// Loading indicator component
+const ScanProgress = ({ status, progress }) => {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '16px',
+      padding: '30px 20px',
+      width: '100%',
+    }}>
+      <style>{progressKeyframes}</style>
+ 
+      {/* Status text */}
+      <p style={{
+        color: '#8cb4d5',
+        fontSize: '0.95em',
+        fontWeight: '500',
+        textAlign: 'center',
+        animation: 'statusPulse 1.8s ease-in-out infinite',
+        margin: 0,
+      }}>
+        {status}
+      </p>
+ 
+      {/* Progress bar track */}
+      <div style={{
+        width: '100%',
+        maxWidth: '320px',
+        height: '8px',
+        backgroundColor: 'rgba(0, 43, 94, 0.2)',
+        borderRadius: '4px',
+        overflow: 'hidden',
+        position: 'relative',
+      }}>
+        {/* Filled portion */}
+        <div style={{
+          width: `${progress}%`,
+          height: '100%',
+          borderRadius: '4px',
+          background: 'linear-gradient(90deg, #002b5e, #0066cc, #002b5e)',
+          backgroundSize: '200% 100%',
+          animation: 'progressShimmer 2s linear infinite',
+          transition: 'width 0.4s ease-out',
+        }} />
+      </div>
+ 
+      {/* Percentage */}
+      <span style={{
+        color: '#5a8aad',
+        fontSize: '0.8em',
+        fontFamily: 'monospace',
+        letterSpacing: '1px',
+      }}>
+        {progress}%
+      </span>
+    </div>
+  );
+};
 
 // For logo animation
-const HeaderLogo = () => {
-  const waveVariants = {
-    initial: {scale: 0.8, opacity: 0},
-    hover: (i) => ({
-      scale: 4.5,
-      opacity: 0,
+const HeaderLogo = ({ isHovered, onHoverStart, onHoverEnd }) => {
+  // Wi-Fi arc animation variants
+  const arcVariants = {
+    initial: { pathLength: 0, opacity: 0 },
+    active: (i) => ({
+      pathLength: [0, 1, 1, 0],
+      opacity: [0, 0.9, 0.9, 0],
       transition: {
-        duration: 1.5,
+        duration: 2,
+        ease: "easeInOut",
         repeat: Infinity,
-        delay: i * 0.5,
-        ease: "easeOut",
+        delay: i * 0.25,
+        times: [0, 0.3, 0.7, 1],
       },
     }),
   };
+ 
+  // Three arcs — smallest to largest
+  const arcs = [
+    { r: 14, strokeWidth: 5 },
+    { r: 22, strokeWidth: 4.5 },
+    { r: 30, strokeWidth: 4 },
+  ];
+ 
   return (
     <motion.div
-      className = "logo-container"
-      initial="inital"
-      whileHover="hover"
+      className="logo-container"
+      onMouseEnter = {onHoverStart}
+      onMouseLeave={onHoverEnd}
       style={{
         position: 'relative',
         display: 'flex',
         justifyContent: 'center',
         alignItems: 'center',
-        cursor: 'pointer'
+        cursor: 'pointer',
       }}
     >
-      {[0, 1, 2].map((i) => (
-        <motion.div
-          key={i}
-          custom={i}
-          variants={waveVariants}
-          style={{
-            position: "absolute",
-            top: "33.5%",
-            left: "90%",
-            width: "10px", 
-            height: "10px",
-            borderRadius: "100 0 0 0",
-            border: "5px solid #002b5e", // Radio-blue color
-            rotate: 110,
-            zIndex: 0,
-          }}
-        />
-      ))}
-      <img 
-        src={AetherGuardLogo} alt="AetherGuard Logo" className="logo" 
+      {/* Wi-Fi arcs SVG — top-right corner of the logo */}
+      <svg
+        width="80"
+        height="80"
+        viewBox="0 0 80 80"
+        fill="none"
+        style={{
+          position: 'absolute',
+          top: '76px',
+          right: '-45px',
+          rotate: '294deg',
+          zIndex: 0,
+          overflow: 'visible',
+          pointerEvents: 'none',
+        }}
+      >
+        {arcs.map((arc, i) => (
+          <motion.path
+            key={i}
+            custom={i}
+            initial="initial"
+            animate={isHovered ? "active" : "initial"}
+            variants={arcVariants}
+            /* Quarter-circle arc: starts at (r, 0) and sweeps to (0, r) */
+            d={`M ${arc.r} 0 A ${arc.r} ${arc.r} 0 0 1 0 ${arc.r}`}
+            transform="translate(4, 4)"
+            stroke="#002b5e"
+            strokeWidth={arc.strokeWidth}
+            strokeLinecap="round"
+            fill="none"
+          />
+        ))}
+      </svg>
+ 
+      <img
+        src={AetherGuardLogo}
+        alt="AetherGuard Logo"
+        className="logo"
         style={{ position: 'relative', zIndex: 1 }}
       />
     </motion.div>
@@ -58,6 +159,9 @@ const HeaderLogo = () => {
 };
 
 function App() {
+  // --- Shared hover state for Wi-Fi arc animation ---
+  const [logoHovered, setLogoHovered] = useState(false);
+
   // State Management
   const [view, setView] = useState('home');
   const [stations, setStations] = useState([]);
@@ -70,6 +174,11 @@ function App() {
   const [selectedStation, setSelectedStation] = useState(null);
   const [selectedLog, setSelectedLog] = useState(null);
   const [logs, setLogs] = useState([]);
+
+  // --- Scan loading state ---
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanStatus, setScanStatus] = useState("");
+  const [scanProgress, setScanProgress] = useState(0);
 
   // For Playback function on DB page
   const [showPlaybackMenu, setShowPlaybackMenu] = useState(false);
@@ -272,7 +381,13 @@ useEffect(() => {
 
       {/* HEADER SECTION */}
       <header className="app-header">
-        <HeaderLogo /> 
+        {view === 'home' && (
+          <HeaderLogo 
+            isHovered={logoHovered}
+            onHoverStart={() => setLogoHovered(true)}
+            onHoverEnd={() => setLogoHovered(false)}
+          />
+        )}
         <h1 className="logo-text">AetherGuard</h1>
         <p className="slogan">Radio Intelligence, Refined.</p>
         <div className="sponsor-tag">
@@ -284,7 +399,12 @@ useEffect(() => {
       {/* HOME VIEW */}
       {view === 'home' && (
         <div className="card">
-          <button className="main-btn" onClick={() => setView('scanning')}>Scan Now</button>
+          <button className="main-btn" 
+            onClick={() => setView('scanning')}
+            onMouseEnter={() => setLogoHovered(true)}
+            onMouseLeave ={() => setLogoHovered(false)} 
+            >Scan Now
+          </button>
           <button className="main-btn" onClick={() => setView('database')}>Database</button>
         </div>
       )}
@@ -461,8 +581,7 @@ useEffect(() => {
           </div>
         </div>
       )}
-
-      {/* SCANNING VIEW */}
+ {/* SCANNING VIEW */}
       {view === 'scanning' && (
         <div className="scanning-container">
           <div className="scanning-grid">
@@ -483,32 +602,48 @@ useEffect(() => {
                 ))}
               </ul>
             </div>
-
+ 
             <div className="data-box">
               <h3>Transmission Summary</h3>
               <div className="summary-content">
-                <p className="summary-text">
-                  {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
-                </p>
-                <hr style={{ borderColor: '#333', margin: '10px 0' }} />
-                
-                {/* DISPLAY SUMMARY FIRST */}
-                <p className="summary-text"><strong>AI Summary:</strong> {activeSummary}</p>
-                
-                {/* DISPLAY RAW TEXT SECOND */}
-                {activeRawText && (
+                {/* Show progress bar when scanning, normal content otherwise */}
+                {isScanning ? (
+                  <ScanProgress status={scanStatus} progress={scanProgress} />
+                ) : (
                   <>
-                    <br/>
-                    <p className="summary-text" style={{ fontSize: "0.85em", color: "#bbb" }}>
-                      <em>Raw Text: {activeRawText}</em>
+                    <p className="summary-text">
+                      {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
                     </p>
+                    <hr style={{ borderColor: '#333', margin: '10px 0' }} />
+                    
+                    <p className="summary-text"><strong>AI Summary:</strong> {activeSummary}</p>
+                    
+                    {activeRawText && (
+                      <>
+                        <br/>
+                        <p className="summary-text" style={{ fontSize: "0.85em", color: "#bbb" }}>
+                          <em>Raw Text: {activeRawText}</em>
+                        </p>
+                      </>
+                    )}
                   </>
                 )}
-
               </div>
               <div className="action-buttons">
-                <button className="sub-btn scan-btn" onClick={handleScan} disabled={!selectedStation}>Scan</button>
-                <button className="sub-btn save-btn" onClick={handleSave} disabled={!selectedStation}>Save</button>
+                <button 
+                  className="sub-btn scan-btn" 
+                  onClick={handleScan} 
+                  disabled={!selectedStation || isScanning}
+                >
+                  {isScanning ? "Scanning..." : "Scan"}
+                </button>
+                <button 
+                  className="sub-btn save-btn" 
+                  onClick={handleSave} 
+                  disabled={!selectedStation || isScanning}
+                >
+                  Save
+                </button>
               </div>
             </div>
           </div>
@@ -520,5 +655,5 @@ useEffect(() => {
     </div>
   )
 }
-
+ 
 export default App
