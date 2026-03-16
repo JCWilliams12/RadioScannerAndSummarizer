@@ -32,6 +32,8 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [localAudioUrl, setLocalAudioUrl] = useState("");
   const audioRef = useRef(null); 
+  const playbackMenuRef = useRef(null);
+
 
   // WebSockets & Live Audio State
   const [isListeningLive, setIsListeningLive] = useState(false);
@@ -79,6 +81,28 @@ function App() {
     fetchLogs(); 
   }, []);
 
+
+  // Close Playback menu when clicking outside of it
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (
+        playbackMenuRef.current && 
+        !playbackMenuRef.current.contains(event.target) &&
+        event.target.id !== 'playback-toggle-btn'
+      ) {
+        setShowPlaybackMenu(false);
+      }
+    };
+
+    if (showPlaybackMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showPlaybackMenu]);
+
+  
   // WIDEBAND FM SPECTRUM SWEEP
   const handleWidebandSweep = async () => {
     setIsScanningBand(true);
@@ -128,8 +152,6 @@ function App() {
         source.connect(audioCtxRef.current.destination);
 
         // --- FIX: Schedule chunks back-to-back using a running clock ---
-        // source.start() with no args stacks all chunks at "now", causing
-        // rhythmic gaps as they fight over the same playback position.
         const currentTime = audioCtxRef.current.currentTime;
         if (nextPlayTimeRef.current < currentTime) {
           // Fell behind (underrun) - re-sync with a small 50ms buffer
@@ -167,8 +189,7 @@ function App() {
     let objectUrl = "";
 
     if (showPlaybackMenu && selectedLog) {
-      // Vite now proxies /whispertinytest to the C++ server
-      fetch("/whispertinytest/audio.wav")
+      fetch("/api/audio/audio.wav")
         .then(res => res.blob())
         .then(blob => {
           objectUrl = URL.createObjectURL(blob);
@@ -186,7 +207,6 @@ function App() {
   const handleScan = async () => {
     if (!selectedStation) return;
 
-    // Lock in targetFreq so the background process doesn't get lost
     const targetFreq = selectedStation.freq;
     const transcribeRoute = useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local';
     const summarizeRoute = useOpenAI ? '/api/summarize/openai' : '/api/summarize/local';
@@ -198,7 +218,6 @@ function App() {
     });
 
     try {
-      // STEP 0: Trigger the 30-second hardware record in C++
       const recordRes = await fetch('/api/scan/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -212,19 +231,15 @@ function App() {
         throw new Error(`Record endpoint returned non-JSON (status: ${recordRes.status}). Check server console.`);
       }
 
-      console.log("[Debug] Record response:", recordRes.status, recordData);
-
       if (!recordRes.ok || recordData?.status !== "recording_started") {
         throw new Error(`Recording failed. Status: ${recordRes.status}, Body: ${JSON.stringify(recordData)}`);
       }
 
-      // Wait for the background C++ thread to finish writing the .wav file
       updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
       await new Promise(resolve => setTimeout(resolve, 31000)); 
 
       updateJob(targetFreq, { summary: "AI: Processing transcription..." });
 
-      // STEP 1: Whisper Transcription
       const transcribeRes = await fetch(transcribeRoute, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -240,7 +255,6 @@ function App() {
         summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
       });
 
-      // STEP 2: Summarization
       const summaryRes = await fetch(summarizeRoute, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -287,8 +301,8 @@ function App() {
           freq: parseFloat(targetFreq),
           time: Math.floor(Date.now() / 1000), 
           location: "Birmingham, AL", 
-          rawT: jobData.rawText,       // Pulling directly from queue
-          summary: jobData.summary,    // Pulling directly from queue
+          rawT: jobData.rawText,       
+          summary: jobData.summary,    
           channelName: selectedStation.name
         }),
       });
@@ -391,7 +405,7 @@ function App() {
           <div className="scanning-grid">
             <div className="data-box">
               <h3>Saved Logs</h3>
-              <ul className="frequency-list">
+              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', paddingRight: '5px' }}>
                 {logs.map(log => (
                   <li 
                     key={log.id}
@@ -414,7 +428,7 @@ function App() {
 
             <div className="data-box">
               <h3>Log Details</h3>
-              <div className="summary-content">
+              <div className="summary-content" style={{ height: '400px', overflowY: 'auto', paddingRight: '15px' }}>
                 {selectedLog ? (
                   <>
                     <p className="summary-text"><strong>Station:</strong> {selectedLog.name}</p>
@@ -438,10 +452,11 @@ function App() {
               </div>
               <div className="action-buttons" style={{ position: 'relative' }}>
                 <button 
+                  id="playback-toggle-btn" 
                   className="sub-btn scan-btn" 
                   onClick={() => setShowPlaybackMenu(!showPlaybackMenu)}
                   disabled={!selectedLog}
-                >
+                > 
                   Playback
                 </button>
                 <button 
@@ -454,7 +469,7 @@ function App() {
 
                 {/* PLAYBACK POPUP MENU */}
                 {showPlaybackMenu && selectedLog && (
-                  <div className="playback-popup">
+                  <div className="playback-popup" ref={playbackMenuRef}>
                     <audio 
                       ref={audioRef}
                       src={localAudioUrl}
@@ -542,18 +557,33 @@ function App() {
         <div className="scanning-container">
           <div className="scanning-grid">
             <div className="data-box">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h3>Live Frequencies</h3>
-                <button 
-                  className="sub-btn" 
-                  onClick={handleWidebandSweep}
-                  disabled={isScanningBand}
-                  style={{ fontSize: '0.7em', padding: '5px 10px' }}
-                >
-                  {isScanningBand ? "Scanning..." : "Find Stations"}
-                </button>
-              </div>
-              <ul className="frequency-list">
+              <h3 style={{ marginBottom: '15px' }}>Live Frequencies</h3>
+              
+              <button 
+                className="sub-btn" 
+                onClick={handleWidebandSweep}
+                disabled={isScanningBand}
+                style={{ 
+                  width: '100%',      
+                  marginBottom: '15px', 
+                  padding: '12px',
+                  backgroundColor: isScanningBand ? '#f39c12' : '#3b82f6',
+                  color: 'white',
+                  fontWeight: 'bold',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: isScanningBand ? 'wait' : 'pointer',
+                  transition: 'background-color 0.3s ease'
+                }}
+              >
+                {isScanningBand ? "Sweeping Spectrum (88-108 MHz)..." : "Auto-Find Stations"}
+              </button>
+
+              {/* Zeroed out default browser list spacing and made it scrollable */}
+              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none' }}>
                 {stations.map(s => (
                   <li 
                     key={s.id}
@@ -571,10 +601,10 @@ function App() {
                 ))}
               </ul>
             </div>
-
+            
             <div className="data-box">
               <h3>Transmission Summary</h3>
-              <div className="summary-content">
+              <div className="summary-content" style={{ height: '400px', overflowY: 'auto', paddingRight: '15px' }}>
                 <p className="summary-text">
                   {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
                 </p>
