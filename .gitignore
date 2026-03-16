@@ -20,6 +20,8 @@ client/.env
 
 build
 server/src/whispertinytest/ggml-base.en.bin
+server/src/ollamatest/Phi-3-mini-4k-instruct-q4.gguf
+server/src/AudioFile/audio.wav
 
 # --- OS / Editor Junk ---
 .DS_Store
