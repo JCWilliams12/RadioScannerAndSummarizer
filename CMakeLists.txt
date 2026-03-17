@@ -88,6 +88,7 @@ include_directories(server/src/iqwav2wav)
 include_directories(server/src/ollamatest)
 include_directories(server/src/openai)
 include_directories(server/src/sdr) 
+include_directories(server/src/RdsDecoder) 
 include_directories(server/src/whispertinytest)
 
 if(WIN32)

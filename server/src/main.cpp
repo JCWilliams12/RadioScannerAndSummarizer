@@ -178,6 +178,16 @@ void openFrontEnd(SdrHandler* sdr) {
         return res;
     });
 
+    CROW_ROUTE(app, "/api/rds/live")
+    ([&sdr]() {
+        // This will block the HTTP request for 3.5 seconds while it listens to the live wave
+        std::string rdsName = sdr->GetLiveRdsText();
+        
+        crow::json::wvalue res;
+        res["name"] = rdsName;
+        return res;
+    });
+
     // =======================================================
     // ROUTE: WIDEBAND SPECTRUM SCANNER (88.0 - 108.0 MHz)
     // =======================================================
@@ -223,11 +233,11 @@ void openFrontEnd(SdrHandler* sdr) {
             sdr->TuneFrequency(freqMHz * 1000000.0);
             
             // 1. Give the hardware PLL 40ms to lock onto the new frequency
-            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             sdr->ClearPowerHistory();
             
             // 2. Accumulate exactly 40ms of clean RF data to prevent -100 dBFS empty buffers
-            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
             float currentRssi = sdr->GetCurrentPower();
             std::cout << "[Sweep] " << freqMHz << " MHz -> " << currentRssi << " dBFS" << std::endl;
@@ -237,29 +247,40 @@ void openFrontEnd(SdrHandler* sdr) {
                 inCluster = true;
                 clusterSteps++;
                 
-                // THE FCC FIX: Only allow odd decimal frequencies to become the 'bestFreq'
-                int freq10 = static_cast<int>(std::round(freqMHz * 10.0));
-                if (freq10 % 2 != 0) { // If it is an odd decimal (e.g., 102.5)
-                    if (currentRssi > bestRssi) {
-                        bestRssi = currentRssi;
-                        bestFreq = freqMHz;
-                    }
+                // Track the absolute physical peak regardless of odd/even rules
+                if (currentRssi > bestRssi) {
+                    bestRssi = currentRssi;
+                    bestFreq = freqMHz;
                 }
             } else {
                 if (inCluster) {
-                    // Check if we actually found a valid odd-frequency peak inside the cluster
                     if (clusterSteps >= 2 && bestFreq > 0.0) {
+                        
+                        // ==========================================================
+                        // THE POST-CLUSTER FCC SNAP
+                        // ==========================================================
+                        // Convert the peak frequency to an integer (e.g., 102.6 -> 1026)
+                        int freq10 = static_cast<int>(std::round(bestFreq * 10.0));
+                        
+                        // If the physical peak was an even decimal due to atmospheric fading, snap it!
+                        if (freq10 % 2 == 0) {
+                            freq10 -= 1; // Snap down to the valid odd decimal (102.6 -> 102.5)
+                            bestFreq = freq10 / 10.0;
+                        }
+                        // ==========================================================
+
                         crow::json::wvalue station;
                         station["freq"] = bestFreq;
+                    
                         station["name"] = "FM Station " + std::to_string(bestFreq).substr(0, 5);
+
                         found_stations.push_back(std::move(station));
                         
                         std::cout << "[Scanner] STATION LOGGED: " << bestFreq 
                                   << " MHz | Peak: " << bestRssi 
                                   << " dBFS | Width: " << clusterSteps << " steps" << std::endl;
                     } else {
-                        std::cout << "[Scanner] Rejected noise spike at " << freqMHz 
-                                  << " MHz (" << clusterSteps << " step)" << std::endl;
+                        std::cout << "[Scanner] Rejected noise spike (" << clusterSteps << " step)" << std::endl;
                     }
                     
                     inCluster    = false;

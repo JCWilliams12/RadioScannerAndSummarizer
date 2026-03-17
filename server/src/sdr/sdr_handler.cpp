@@ -1,4 +1,5 @@
 #include "sdr_handler.hpp"
+#include "RdsDecoder.hpp"
 #include <cmath>
 
 extern void broadcastAudio(const std::vector<int16_t>& audioBuffer);
@@ -58,6 +59,51 @@ bool SdrHandler::InitializeAPI() {
     return true;
 }
 
+std::string SdrHandler::GetStationName(double freqMHz) {
+    // 1. Tune to the target frequency
+    TuneFrequency(freqMHz * 1000000.0);
+    
+    // Give the hardware PLL 40ms to lock and flush the old static
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // 2. Prepare the bucket
+    // Assuming a 250,000 Hz sample rate during the narrow scan.
+    // We need about 1.5 seconds of data to guarantee a full RDS looping packet.
+    size_t sampleRate = 250000; 
+    size_t requiredSamples = sampleRate * 1.5; 
+
+    // 2. Prepare the bucket
+    {
+        std::lock_guard<std::mutex> lock(rds_mutex);
+        rds_iq_buffer.clear();
+        rds_iq_buffer.reserve(3000000); // Reserve a massive chunk so memory doesn't stall
+        
+        // Start the stopwatch and pull the trigger!
+        rds_start_time = std::chrono::steady_clock::now();
+        rds_capture_active = true; 
+    }
+
+    // 3. Put this thread to sleep until the callback fills the bucket
+    std::unique_lock<std::mutex> wait_lock(rds_mutex);
+    
+    if (rds_cv.wait_for(wait_lock, std::chrono::milliseconds(4500), [this]{ return !rds_capture_active.load(); })) {
+        
+        // THE FIX: Calculate the exact sample rate dynamically!
+        // (Total Floats / 2 for I&Q pairs) divided by 1.5 seconds
+        float actualSampleRate = 500000.0f;
+        
+        std::cout << "[RDS] Captured 1.5s. True Sample Rate: " << actualSampleRate << " Hz" << std::endl;
+        
+        std::string name = RdsDecoder::ExtractName(rds_iq_buffer, actualSampleRate);
+        return name;
+        
+    } else {
+        std::cout << "[RDS] Capture timeout!" << std::endl;
+        rds_capture_active = false;
+        return "TIMEOUT";
+    }
+}
+
 bool SdrHandler::StartStream(double startFreqHz) {
     if (!deviceParams) return false;
 
@@ -90,6 +136,32 @@ bool SdrHandler::StartStream(double startFreqHz) {
 
     isStreaming = true;
     return true;
+}
+
+std::string SdrHandler::GetLiveRdsText() {
+    // We assume the SDR is ALREADY tuned and streaming audio!
+    // 1. Prepare the bucket
+    {
+        std::lock_guard<std::mutex> lock(rds_mutex);
+        rds_iq_buffer.clear();
+        rds_iq_buffer.reserve(3500000); 
+        
+        rds_start_time = std::chrono::steady_clock::now();
+        rds_capture_active = true; 
+    }
+
+    // 2. Sleep until the live audio callback fills the 3.5s bucket
+    std::unique_lock<std::mutex> wait_lock(rds_mutex);
+    
+    if (rds_cv.wait_for(wait_lock, std::chrono::milliseconds(4500), [this]{ return !rds_capture_active.load(); })) {
+        float actualSampleRate = 500000.0f; 
+        std::cout << "[RDS] Background capture complete. Decoding..." << std::endl;
+        
+        return RdsDecoder::ExtractName(rds_iq_buffer, actualSampleRate);
+    } else {
+        rds_capture_active = false;
+        return "UNKNOWN";
+    }
 }
 
 bool SdrHandler::TuneFrequency(double newFreqHz) {
@@ -136,7 +208,7 @@ void SdrHandler::StreamCallback(short *xi, short *xq, sdrplay_api_StreamCbParams
 
     if (reset) return;
 
-    // Calculate dBFS power for this callback window
+    // 1. Calculate dBFS power for this callback window
     float sumMagSq = 0.0f;
     for (unsigned int i = 0; i < numSamples; ++i) {
         float i_val = static_cast<float>(xi[i]);
@@ -147,7 +219,7 @@ void SdrHandler::StreamCallback(short *xi, short *xq, sdrplay_api_StreamCbParams
     float maxValSq  = 32767.0f * 32767.0f;
     float dbFS      = 10.0f * std::log10((meanMagSq / maxValSq) + 1e-10f);
 
-    // Push into rolling history, evict oldest if full
+    // 2. Push into rolling history, evict oldest if full
     {
         std::lock_guard<std::mutex> lock(sdr->powerMutex);
         sdr->powerHistory.push_back(dbFS);
@@ -156,7 +228,30 @@ void SdrHandler::StreamCallback(short *xi, short *xq, sdrplay_api_StreamCbParams
         }
     }
 
-    // Feed I/Q samples to the DSP engine for demodulation + recording
+    // ====================================================================
+    // 3. THE RDS HIJACK (Divert a copy of the waves if the scanner asked for them)
+    // ====================================================================
+    if (sdr->rds_capture_active.load()) {
+        std::lock_guard<std::mutex> lock(sdr->rds_mutex);
+        
+        for (unsigned int i = 0; i < numSamples; ++i) {
+            sdr->rds_iq_buffer.push_back(xi[i] / 32768.0f);
+            sdr->rds_iq_buffer.push_back(xq[i] / 32768.0f);
+        }
+        
+        // Check the stopwatch
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - sdr->rds_start_time).count();
+        
+        // If exactly 3.5 seconds have passed, shut it down
+        if (elapsed >= 3500) {
+            sdr->rds_capture_active.store(false); 
+            sdr->rds_cv.notify_one();             
+        }
+    }
+    // ====================================================================
+
+    // 4. Feed I/Q samples to the DSP engine for demodulation + recording
     if (sdr->dspModule && sdr->isStreaming) {
         sdr->dspModule->ProcessBlock(xi, xq, numSamples);
     }

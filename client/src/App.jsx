@@ -349,6 +349,45 @@ function App() {
     };
   }, [isListeningLive, selectedStation]);
 
+  // LIVE RDS TEXT POLLER
+  useEffect(() => {
+    let rdsInterval;
+
+    // Only poll if the user is currently tuned to a station (either live listening or scanning)
+    if (selectedStation && (isListeningLive || isScanning)) {
+      
+      const fetchRds = async () => {
+        try {
+          const res = await fetch('/api/rds/live');
+          const data = await res.json();
+          
+          // If the C++ math caught a real name (not UNKNOWN), update the UI!
+          if (data.name && data.name !== "UNKNOWN") {
+            console.log("RDS Update:", data.name);
+            
+            setSelectedStation(prev => ({ ...prev, name: data.name }));
+            
+            setStations(prevStations => 
+              prevStations.map(s => 
+                s.freq === selectedStation.freq ? { ...s, name: data.name } : s
+              )
+            );
+          }
+        } catch (err) {
+          console.error("RDS Polling error:", err);
+        }
+      };
+
+      // Fire it immediately, then every 5 seconds
+      fetchRds();
+      rdsInterval = setInterval(fetchRds, 5000);
+    }
+
+    return () => {
+      if (rdsInterval) clearInterval(rdsInterval);
+    };
+  }, [selectedStation, isListeningLive, isScanning]);
+
   // Fetch audio as a Blob to allow perfect scrubbing
   useEffect(() => {
     let objectUrl = "";
@@ -805,6 +844,14 @@ function App() {
                 )}
               </div>
               <div className="action-buttons">
+                {/* THE RE-ADDED LISTEN LIVE BUTTON */}
+                <button 
+                  className="sub-btn" 
+                  onClick={() => setIsListeningLive(!isListeningLive)} 
+                  disabled={!selectedStation || isScanning}
+                >
+                  {isListeningLive ? "Stop Live" : "Listen Live"}
+                </button>
                 <button 
                   className="sub-btn scan-btn" 
                   onClick={handleScan} 

@@ -7,6 +7,7 @@
 #include <vector>
 #include <numeric>
 #include <mutex>
+#include <chrono>
 #include "../iqtowav/iqtowav.hpp"
 
 class SdrHandler {
@@ -34,6 +35,9 @@ public:
         powerHistory.clear();
     }
 
+    std::string GetStationName(double freqMHz);
+    std::string SdrHandler::GetLiveRdsText();
+
     sdrplay_api_DeviceT* getDeviceHandle() { return &chosenDevice; }
 
     IqToWav* dspModule;
@@ -45,6 +49,11 @@ private:
 
     // Rolling power history - stores last N callback readings
     // N=8 at ~4ms/callback = ~32ms averaging window, stable but responsive
+    std::vector<float> rds_iq_buffer;          // The temporary bucket for radio waves
+    std::atomic<bool> rds_capture_active{false}; // The trigger flag
+    std::chrono::steady_clock::time_point rds_start_time;   // How big the bucket needs to be
+    std::mutex rds_mutex;
+    std::condition_variable rds_cv;
     mutable std::mutex powerMutex;
     std::vector<float> powerHistory;
     static constexpr int POWER_HISTORY_SIZE = 8;
