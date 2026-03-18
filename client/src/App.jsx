@@ -804,7 +804,20 @@ function App() {
                   </>
                 )}
               </div>
-              <div className="action-buttons">
+                <div className="action-buttons">
+                {/* RESTORED: Listen Live Toggle */}
+                <button 
+                  className="sub-btn" 
+                  style={{ 
+                    backgroundColor: isListeningLive ? '#e74c3c' : '#f39c12',
+                    color: 'white' 
+                  }}
+                  onClick={() => setIsListeningLive(!isListeningLive)} 
+                  disabled={!selectedStation || isScanning}
+                >
+                  {isListeningLive ? "Stop Live Audio" : "Listen Live"}
+                </button>
+
                 <button 
                   className="sub-btn scan-btn" 
                   onClick={handleScan} 
@@ -812,6 +825,7 @@ function App() {
                 >
                   {isScanning ? "Scanning..." : "Scan"}
                 </button>
+                
                 <button 
                   className="sub-btn save-btn" 
                   onClick={handleSave} 
