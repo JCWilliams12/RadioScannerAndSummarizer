@@ -69,7 +69,8 @@ void setBandwidth(SdrHandler* sdr, sdrplay_api_Bw_MHzT bw, sdrplay_api_If_kHzT i
 void openFrontEnd(SdrHandler* sdr, bool isMock) {
 
     crow::SimpleApp app;
-
+    createTable();
+    
     curl_global_init(CURL_GLOBAL_ALL);
     auto env = loadEnv(".env");
     std::string apiKey = "";
@@ -79,12 +80,6 @@ void openFrontEnd(SdrHandler* sdr, bool isMock) {
         std::cerr << "CRITICAL ERROR: OPENAI_API_KEY not found in .env file!" << std::endl;
     }
 
-<<<<<<< HEAD
-    // Call your DB init function here!
-    // initializeDatabase(); 
-
-=======
->>>>>>> parent of bb08b56 (initialized the database)
     // =======================================================
     // WEBSOCKET ROUTE: LIVE AUDIO STREAM
     // =======================================================
