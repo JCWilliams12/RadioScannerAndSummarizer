@@ -428,11 +428,12 @@ void openFrontEnd(SdrHandler* sdr) {
     // =======================================================
     // ROUTE: SERVE AUDIO FILES TO REACT
     // =======================================================
-    CROW_ROUTE(app, "/whispertinytest/<string>")
+    CROW_ROUTE(app, "/api/audio/<string>")
     ([](std::string filename) {
         std::cout << "[Audio] React requested: " << filename << std::endl;
 
-        std::string file_path = "server/src/whispertinytest/" + filename;
+        // FIX: Pointing to the correct AudioFile directory
+        std::string file_path = "server/src/AudioFile/" + filename; 
         std::ifstream file(file_path, std::ios::binary);
 
         if (!file) {
