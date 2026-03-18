@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import './App.css'
-
+//Comment so I can push to main 
 function App() {
   // State Management
   const [view, setView] = useState('home');
