@@ -108,30 +108,50 @@ add_executable(server
 )
 
 # --- 6. LINKING LOGIC ---
+# 1. Define common libraries all platforms need
+set(COMMON_LIBS 
+    Threads::Threads 
+    whisper 
+    llama 
+    libcurl_static
+)
+
+# 2. Logic to find the SDRplay library specifically
 if(WIN32)
-    target_link_libraries(server 
-        Threads::Threads 
-        Ws2_32 
-        Crypt32    
-        Wldap32    
-        Normaliz   
-        whisper 
-        llama              # Link the new llama.cpp library
-        libcurl_static
-        "C:/Program Files/SDRplay/API/x64/sdrplay_api.lib"
-    )
+    # Windows-specific search
+    set(SDRPLAY_LIB "C:/Program Files/SDRplay/API/x64/sdrplay_api.lib")
+    set(PLATFORM_LIBS Ws2_32 Crypt32 Wldap32 Normaliz)
 else()
-    target_link_libraries(server 
-        Threads::Threads 
-        dl 
-        whisper 
-        llama              # Link the new llama.cpp library
-        libcurl_static
-        "/Library/SDRplayAPI/3.15.1/lib/libsdrplay_api.so.3.15" 
-        "/usr/local/lib/libsdrplay_api.dylib"
-        "/usr/local/lib/libsdrplay_api.so.3"
+    # 1. Broad Search: Look for any version of the library in known locations
+    find_library(SDRPLAY_LIB 
+        NAMES 
+            sdrplay_api              # Standard name
+            sdrplay_api.so.3.15     # Specific Linux version
+            sdrplay_api.so.3        # Generic Linux major version
+            libsdrplay_api.dylib    # macOS name
+        PATHS 
+            /usr/local/lib          # Standard Linux location
+            /usr/lib                # Linux fallback
+            /Library/SDRplayAPI/3.15.1/lib  # Your specific Mac path
+            /opt/sdrplay/lib        # Common alternative Linux path
     )
+
+    # 2. Final Check
+    if(NOT SDRPLAY_LIB)
+        message(FATAL_ERROR "SDRplay API not found! Verified /usr/local/lib, but CMake still can't see it. Check permissions or run 'sudo ldconfig'.")
+    else()
+        message(STATUS "Found SDRplay API at: ${SDRPLAY_LIB}")
+    endif()
+
+    set(PLATFORM_LIBS dl)
 endif()
+
+# 3. Final link command
+target_link_libraries(server 
+    ${COMMON_LIBS}
+    ${PLATFORM_LIBS}
+    ${SDRPLAY_LIB}
+)
 
 if(WIN32)
     add_custom_command(TARGET server POST_BUILD

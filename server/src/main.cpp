@@ -453,6 +453,55 @@ void openFrontEnd(SdrHandler* sdr) {
     });
 
     // =======================================================
+    // ROUTE: Search Logs from the Database (by Frequency or Location)
+    // =======================================================
+    CROW_ROUTE(app, "/api/search")
+    ([](const crow::request& req) {
+        // 1. Grab the search query from the URL (e.g., ?q=157.570)
+        auto q = req.url_params.get("q");
+    
+        if (!q) {
+            return crow::response(400, "Missing search query");
+        }
+
+        std::vector<RadioLog> logs;
+
+        // 2. Decide how to search based on the input
+        try {
+            // Try converting the search term to a double (for frequency)
+            double searchFreq = std::stod(q);
+            logs = filterByFrequency(searchFreq);
+        } catch (const std::invalid_argument& e) {
+            // If it's not a number (e.g., they typed "Huntsville"), search by location
+            logs = filterByLocation(q);
+        }
+
+        // 3. Convert the C++ std::vector into a JSON array
+        crow::json::wvalue json_response;
+    
+        if (logs.empty()) {
+            // If no results, explicitly return an empty JSON array: []
+            // This prevents React from crashing when it tries to map() over null
+            json_response = crow::json::wvalue(crow::json::type::List); 
+        } else {
+            // Loop through the C++ vector and assign fields to the JSON object
+            for (size_t i = 0; i < logs.size(); i++) {
+                json_response[i]["freq"]     = logs[i].freq;
+                json_response[i]["time"]     = logs[i].time;
+                json_response[i]["location"] = logs[i].location;
+                json_response[i]["text"]     = logs[i].rawT;
+                json_response[i]["summary"]  = logs[i].summary;
+                json_response[i]["name"]     = logs[i].channelName;
+            }
+        }
+
+        // 4. Send the JSON back to React with CORS headers
+        crow::response res(json_response);
+        res.add_header("Access-Control-Allow-Origin", "*");
+        return res;
+    });
+
+    // =======================================================
     // SERVER STARTUP
     // =======================================================
     try {
@@ -467,21 +516,33 @@ void openFrontEnd(SdrHandler* sdr) {
 
 int main() {
     SdrHandler sdr;
+    bool isSimulation = false; // Set to true to bypass hardware for testing
 
     std::cout << "Starting AetherGuard SDR System..." << std::endl;
 
     if (!sdr.InitializeAPI()) {
         std::cerr << "Hardware initialization failed." << std::endl;
-        return 1;
+        isSimulation = true;
     }
 
-    if (!sdr.StartStream(154500000.0)) {
-        std::cerr << "Stream start failed." << std::endl;
-        sdr.ShutdownSDR();
-        return 1;
+    if(!isSimulation){
+        if (!sdr.StartStream(154500000.0)) {
+            std::cerr << "Hardware not detected. Starting simulation." << std::endl;
+            isSimulation = true;
+        }
     }
+
+    if(isSimulation){
+        std::cout << "SIMULATION MODE: Generating fake audio stream and database logs." << std::endl;
+        // In simulation mode, we can generate fake logs or feed in pre-recorded audio
+        // For simplicity, we'll just insert a dummy log into the database
+        insertLog(101.198, 1697040000, "Testville", "Raw transcription text here", "Summary of the broadcast", "Test Channel");
+    }
+    
 
     openFrontEnd(&sdr);
+
+    
 
     sdr.ShutdownSDR();
     return 0;

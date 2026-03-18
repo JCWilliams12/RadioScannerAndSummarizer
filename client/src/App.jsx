@@ -182,6 +182,12 @@ function App() {
   const [selectedLog, setSelectedLog] = useState(null);
   const [logs, setLogs] = useState([]);
 
+  // State for search term
+  const [searchTerm, setSearchTerm] = useState("");
+
+  // State that tracks whether a search is active.
+  const [isSearchActive, setIsSearchActive] = useState(false);
+
   // --- Scan loading state ---
   const [isScanning, setIsScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
@@ -226,6 +232,8 @@ function App() {
       const res = await fetch('/api/logs'); 
       const data = await res.json();
       setLogs(data);
+      setIsSearchActive(false);
+      setSearchTerm('');
     } catch (err) {
       console.error("Failed to fetch logs:", err);
     }
@@ -240,6 +248,20 @@ function App() {
       console.error("Link to C++ failed:", err);
     }
   };
+
+  const searchDatabase = async () => {
+    try {
+    // We send the 'searchTerm' variable to our C++ Crow server
+      const response = await fetch(`http://localhost:8080/api/search?q=${searchTerm}`);
+      const data = await response.json();
+      setLogs(data); // This will replace the logs list with the search results
+      setIsSearchActive(true);
+    } catch (error) {
+      console.error("Failed to connect to C++ backend:", error);
+    }
+  };
+
+
 
   useEffect(() => {
     fetchStations();
@@ -581,8 +603,15 @@ function App() {
         <div className="database-view-wrapper">
           <div className="scanning-grid">
             <div className="data-box">
-              <h3>Saved Logs</h3>
-              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', paddingRight: '5px' }}>
+              <div className="search-bar-container" style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '15px' }}>
+                <h3 style={{ borderBottom: 'none', paddingBottom: 0, margin: 0, whiteSpace: 'nowrap' }}>Saved Logs</h3>
+                <input type="text" placeholder="Search by freq..." className="search-input" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && searchDatabase()} />
+                {isSearchActive ? (
+                  <button className="back-btn" style={{ marginBottom: 0, padding: '8px 16px', backgroundColor: '#800000' }} onClick={fetchLogs}>Cancel</button>
+                  ) : (
+                  <button className="back-btn" style={{ marginBottom: 0, padding: '8px 16px' }} onClick={searchDatabase}>Search</button>)}
+              </div>
+              <ul className="frequency-list">
                 {logs.map(log => (
                   <li 
                     key={log.id}
@@ -728,6 +757,7 @@ function App() {
           </div>
         </div>
       )}
+
  {/* SCANNING VIEW */}
       {view === 'scanning' && (
         <div className="scanning-container">

@@ -2,13 +2,15 @@
 #define DBCOREFILTERHPP
 
 #include <string>
-
+#include <vector>
 // Global database path
 extern const char* DB_NAME;
 
+#include "../corefunction/dbcorefunctions.hpp"
+
 // Filter functions
-std::string filterByFrequency(double freq);
-std::string filterByTime(long long unixTime); // Updated name to match your .cpp
-std::string filterByLocation(std::string loc);
+std::vector<RadioLog> filterByFrequency(double freq);
+std::vector<RadioLog> filterByTime(long long unixTime); // Updated name to match your .cpp
+std::vector<RadioLog> filterByLocation(const std::string& loc);
 
 #endif
