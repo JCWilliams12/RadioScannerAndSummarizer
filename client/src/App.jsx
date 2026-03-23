@@ -391,12 +391,53 @@ function App() {
   }, [showPlaybackMenu, selectedLog]);
 
   // THE 3-STEP SCAN HANDLER (Record -> Transcribe -> Summarize)
+// --- NEW: Status WebSocket Listener ---
+  useEffect(() => {
+    const statusWs = new WebSocket(`ws://${window.location.host}/ws/status`);
+    
+    statusWs.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      const freq = data.freq;
+
+      if (data.event === "record_complete") {
+        updateJob(freq, { summary: "AI: Processing transcription..." });
+        
+        // Trigger Transcribe Request
+        fetch(useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ freq: parseFloat(freq) }),
+        });
+      } 
+      else if (data.event === "transcription_complete") {
+        updateJob(freq, { 
+          rawText: data.text,
+          summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
+        });
+
+        // Trigger Summarize Request
+        fetch(useOpenAI ? '/api/summarize/openai' : '/api/summarize/local', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: data.text, freq: parseFloat(freq) }),
+        });
+      }
+      else if (data.event === "summary_complete") {
+        updateJob(freq, { 
+          status: "complete",
+          summary: data.summary 
+        });
+      }
+    };
+
+    return () => statusWs.close();
+  }, [useOpenAI]);
+
+
+  // THE 3-STEP SCAN HANDLER (Refactored for Async WebSockets)
   const handleScan = async () => {
     if (!selectedStation) return;
-
     const targetFreq = selectedStation.freq;
-    const transcribeRoute = useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local';
-    const summarizeRoute = useOpenAI ? '/api/summarize/openai' : '/api/summarize/local';
 
     updateJob(targetFreq, { 
       status: "recording",
@@ -405,64 +446,15 @@ function App() {
     });
 
     try {
-      const recordRes = await fetch('/api/scan/record', {
+      await fetch('/api/scan/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ freq: parseFloat(targetFreq) })
       });
-
-      let recordData = null;
-      try {
-        recordData = await recordRes.json();
-      } catch {
-        throw new Error(`Record endpoint returned non-JSON (status: ${recordRes.status}). Check server console.`);
-      }
-
-      if (!recordRes.ok || recordData?.status !== "recording_started") {
-        throw new Error(`Recording failed. Status: ${recordRes.status}, Body: ${JSON.stringify(recordData)}`);
-      }
-
-      updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
-      await new Promise(resolve => setTimeout(resolve, 31000)); 
-
-      updateJob(targetFreq, { summary: "AI: Processing transcription..." });
-
-      const transcribeRes = await fetch(transcribeRoute, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ freq: parseFloat(targetFreq) }),
-      });
-
-      if (!transcribeRes.ok) throw new Error(`Transcription failed (${transcribeRes.status})`);
-      const transcribeData = await transcribeRes.json();
-      
-      const rawText = transcribeData.transcription;
-      updateJob(targetFreq, { 
-        rawText: rawText,
-        summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
-      });
-
-      const summaryRes = await fetch(summarizeRoute, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: rawText }),
-      });
-
-      if (!summaryRes.ok) throw new Error(`Summarization failed (${summaryRes.status})`);
-      const summaryData = await summaryRes.json();
-      
-      updateJob(targetFreq, { 
-        status: "complete",
-        summary: summaryData.summary 
-      });
-
+      // The rest is handled automatically by the WebSocket listener above!
     } catch (error) {
       console.error(`Scan error on ${targetFreq}:`, error);
-      updateJob(targetFreq, { 
-        status: "error",
-        summary: `Error: ${error.message}`,
-        rawText: "Scan failed. Check server console."
-      });
+      updateJob(targetFreq, { status: "error", summary: `Error: ${error.message}` });
     }
   };
 

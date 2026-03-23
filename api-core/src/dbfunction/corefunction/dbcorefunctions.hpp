@@ -14,7 +14,7 @@ struct RadioLog {
     std::string channelName;
 };
 
-void createTable();
+bool createTable();
 void insertLog(double freq, long long time, std::string location, std::string rawT, std::string summary, std::string channelName);
 int removeLog(double freq, long long time, std::string location);
 void openDatabase();

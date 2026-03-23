@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  ag-redis:
+    image: redis:alpine
+    container_name: ag-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - aetherguard_net
+
+  ag-api:
+    build:
+      context: .
+      dockerfile: api-core/Dockerfile
+    container_name: ag-api
+    ports:
+      - "8080:8080" # Keeping it on 8080 so React doesn't break
+    volumes:
+      - ./shared-data:/app/shared
+    env_file:
+      - .env
+    depends_on:
+      - ag-redis
+    networks:
+      - aetherguard_net
+
+  ag-ai:
+    build:
+      context: .
+      dockerfile: ai-worker/Dockerfile
+    container_name: ag-ai
+    volumes:
+      - ./shared-data:/app/shared
+    env_file:
+      - .env
+    depends_on:
+      - ag-redis
+    networks:
+      - aetherguard_net
+
+  ag-sdr-live:
+    build:
+      context: .
+      dockerfile: sdr-daemon/Dockerfile
+    container_name: ag-sdr-live
+    privileged: true
+    ipc: host                  
+    shm_size: '512m'           
+    ulimits:                   
+      rtprio: 99
+      memlock: -1
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - ./shared-data:/app/shared
+    depends_on:
+      - ag-redis
+    networks:
+      - aetherguard_net
+    command: /bin/sh -c "/opt/sdrplay_api/sdrplay_apiService & sleep 2 && ./build/sdr_daemon"
+
+networks:
+  aetherguard_net:
+    driver: bridge

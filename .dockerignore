@@ -1,0 +1,4 @@
+shared-data/
+**/build/
+**/.git/
+**/node_modules/

@@ -18,6 +18,7 @@ public:
     bool StartStream(double startFreqHz);
     bool TuneFrequency(double newFreqHz);
     void ShutdownSDR();
+    bool isStreaming;
 
     // Returns a stable averaged power reading across recent callbacks
     float GetCurrentPower() const {
@@ -41,7 +42,7 @@ public:
 private:
     sdrplay_api_DeviceParamsT* deviceParams;
     sdrplay_api_DeviceT chosenDevice;
-    bool isStreaming;
+    
 
     // Rolling power history - stores last N callback readings
     // N=8 at ~4ms/callback = ~32ms averaging window, stable but responsive

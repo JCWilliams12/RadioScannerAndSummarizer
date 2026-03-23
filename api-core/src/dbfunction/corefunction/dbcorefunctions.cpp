@@ -8,11 +8,11 @@ extern "C" {
     #include "sqlite3.h"
 }
 
-const char* DB_NAME = "server/database/app.db";
+const char* DB_NAME = "/app/shared/db/app.db";
 
 // -=- 1. CREATE TABLE -=-
 // Creates the table only if it doesn't exist yet.
-void createTable() {
+bool createTable() {
     sqlite3 *db;
     char *zErrMsg = 0;
     int rc;
@@ -21,7 +21,7 @@ void createTable() {
 
     if (rc) {
         fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
-        return;
+        return false;
     }
 
     // Updated Schema: freq, time, location, rawT, summary, channelName
@@ -46,6 +46,7 @@ void createTable() {
     }
 
     sqlite3_close(db);
+    return true;
 }
 
 // -=- 2. INSERT ROW -=-

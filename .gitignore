@@ -29,3 +29,12 @@ server/src/AudioFile/audio.wav
 .idea/
 *.swp
 *.env
+
+# Ignore Docker shared volume and audio recordings
+shared-data/
+*.wav
+
+# Ignore compiled binaries and build folders
+build/
+*.o
+sdr_daemon
