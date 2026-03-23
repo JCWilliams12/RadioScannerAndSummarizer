@@ -31,10 +31,13 @@ server/src/AudioFile/audio.wav
 *.env
 
 # Ignore Docker shared volume and audio recordings
-shared-data/
+
 *.wav
 
 # Ignore compiled binaries and build folders
 build/
 *.o
 sdr_daemon
+
+shared-data/models/ggml-base.en.bin
+shared-data/models/Phi-3-mini-4k-instruct-q4.gguf
