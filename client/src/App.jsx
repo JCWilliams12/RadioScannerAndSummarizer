@@ -46,7 +46,7 @@ const ScanProgress = ({ status, progress }) => {
         width: '100%',
         maxWidth: '320px',
         height: '8px',
-        backgroundColor: 'rgba(0, 43, 94, 0.2)',
+        backgroundColor: 'rgba(3, 3, 3, 0.2)',
         borderRadius: '4px',
         overflow: 'hidden',
         position: 'relative',
@@ -192,6 +192,7 @@ function App() {
   const [isScanning, setIsScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
   const [scanProgress, setScanProgress] = useState(0);
+
 
   // For Playback function on DB page
   const [showPlaybackMenu, setShowPlaybackMenu] = useState(false);
@@ -398,6 +399,10 @@ function App() {
     const transcribeRoute = useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local';
     const summarizeRoute = useOpenAI ? '/api/summarize/openai' : '/api/summarize/local';
 
+    setIsScanning(true);
+    setScanProgress(5);
+    setScanStatus(`Connecting to ${Number(targetFreq).toFixed(3)} MHz...`);
+
     updateJob(targetFreq, { 
       status: "recording",
       summary: "Hardware: Recording 30-second capture...",
@@ -405,6 +410,9 @@ function App() {
     });
 
     try {
+      setScanProgress(10);
+      setScanStatus("Hardware: Starting 30-second recording...");
+      
       const recordRes = await fetch('/api/scan/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -423,9 +431,30 @@ function App() {
       }
 
       updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
-      await new Promise(resolve => setTimeout(resolve, 31000)); 
 
-      updateJob(targetFreq, { summary: "AI: Processing transcription..." });
+      //Animate progress
+      const recordingStart = Date.now();
+      const recordingDuration = 31000
+      const progressInterval = setInterval(() => {
+        const elapsed = Date.now() - recordingStart;
+      const ratio = Math.min(elapsed / recordingDuration, 1);
+      const currentProgress = Math.round(10 + ratio * 35);
+      setScanProgress(currentProgress);
+
+      const secondsLeft = Math.max(0, Math.ceil((recordingDuration - elapsed) / 1000));
+      setScanStatus(`Hardware: Recording in progress... (${secondsLeft}s remaining)`);
+
+      if (ratio >= 1) clearInterval(progressInterval);}, 500);
+
+      await new Promise(resolve => setTimeout(resolve, recordingDuration));
+      clearInterval(progressInterval);
+
+      //Transcribe
+
+      setScanProgress(50);
+      setScanStatus("Transcribing audio")
+      updateJob(targetFreq, { summary: "AI: Processing transcription...",});
+
 
       const transcribeRes = await fetch(transcribeRoute, {
         method: 'POST',
@@ -442,6 +471,10 @@ function App() {
         summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
       });
 
+      //summarize
+      setScanProgress(75);
+      setScanStatus("Generating summary...");
+
       const summaryRes = await fetch(summarizeRoute, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -450,11 +483,23 @@ function App() {
 
       if (!summaryRes.ok) throw new Error(`Summarization failed (${summaryRes.status})`);
       const summaryData = await summaryRes.json();
+
+            // Finalize
+      setScanProgress(95);
+      setScanStatus("Finalizing scan...");
       
       updateJob(targetFreq, { 
         status: "complete",
         summary: summaryData.summary 
       });
+
+      await new Promise(r => setTimeout(r, 400));
+      
+      setScanProgress(100);
+      setScanStatus("Scan complete");
+
+      await new Promise(r => setTimeout(r, 800));
+      setIsScanning(false);
 
     } catch (error) {
       console.error(`Scan error on ${targetFreq}:`, error);
@@ -463,6 +508,12 @@ function App() {
         summary: `Error: ${error.message}`,
         rawText: "Scan failed. Check server console."
       });
+      setScanStatus(`Error: ${error.message}`);
+      setScanProgress(0);
+ 
+      // Keep the error visible briefly before clearing
+      await new Promise(r => setTimeout(r, 2000));
+      setIsScanning(false);
     }
   };
 
