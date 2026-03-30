@@ -28,4 +28,7 @@ cd client
 npm install
 npm run dev
 
+docker-compose up --build
 usbipd attach --wsl --busid <BUSID>
+docker-compose down
+docker-compose up --build

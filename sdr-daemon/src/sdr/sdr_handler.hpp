@@ -1,11 +1,12 @@
-#pragma once
+#ifndef SDR_HANDLER_HPP
+#define SDR_HANDLER_HPP
+
 #include <sdrplay_api.h>
 #include <vector>
 #include <mutex>
-#include <iostream>
 #include <atomic>
 
-#define POWER_HISTORY_SIZE 100
+#define POWER_HISTORY_SIZE 50
 
 class SdrHandler {
 public:
@@ -13,31 +14,32 @@ public:
     ~SdrHandler();
 
     bool InitializeAPI();
-    bool StartStream(double startFreqHz);
-    bool TuneFrequency(double newFreqHz);
+    bool StartStream(double initialFreq);
     void ShutdownSDR();
-    float GetCurrentPower() {
-        std::lock_guard<std::mutex> lock(powerMutex);
-        return powerHistory.empty() ? -100.0f : powerHistory.back();
-    }
-    void ClearPowerHistory() {
-        std::lock_guard<std::mutex> lock(powerMutex);
-        powerHistory.clear();
-    }
+    
+    // Updated to match the new void return type in the .cpp
+    void TuneFrequency(double hz);
+
+    // Declared here, implemented in the .cpp (fixes the redefinition error)
+    float GetCurrentPower();
+    void ClearPowerHistory();
 
     sdrplay_api_DeviceT* getDeviceHandle() { return &chosenDevice; }
-    std::atomic<bool> isStreaming;
 
 private:
     sdrplay_api_DeviceT chosenDevice;
-    sdrplay_api_DeviceParamsT* deviceParams;
-    
+    sdrplay_api_DeviceParamsT *deviceParams;
+    std::atomic<bool> isStreaming;
+
     std::vector<float> powerHistory;
     std::mutex powerMutex;
-    
 
-    static void StreamCallback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
-                               unsigned int numSamples, unsigned int reset, void *cbContext);
+    // Updated to exactly match the API's required static callback signatures
+    static void StreamACallback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
+                                unsigned int numSamples, unsigned int reset, void *cbContext);
+    
     static void EventCallback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tuner,
                               sdrplay_api_EventParamsT *params, void *cbContext);
 };
+
+#endif // SDR_HANDLER_HPP
