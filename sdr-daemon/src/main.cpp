@@ -13,24 +13,30 @@
 #include <liquid/liquid.h>
 #include <sndfile.h>
 #include "crow.h"
+
+#include <sdrplay_api.h>
 #include "sdr_handler.hpp"
 
 // =======================================================
 // SYSTEM STATE
 // =======================================================
-enum class DeviceMode { IDLE, SCANNING, RECORDING };
+enum class DeviceMode { IDLE, SCANNING, RECORDING, LIVE_LISTEN };
 std::atomic<DeviceMode> g_mode(DeviceMode::IDLE);
+
+std::atomic<int> g_dropped_chunks(0);
+std::atomic<int> g_processed_chunks(0);
 
 redisContext* g_redis_pub = nullptr;
 std::mutex g_redis_pub_mtx;
 
-// =======================================================
-// THREAD-SAFE QUEUES & BUFFERS
-// =======================================================
 std::queue<std::vector<int16_t>> g_iq_queue;
-std::vector<int16_t> g_iq_flat_buffer; // THE FIX: Thread-safe batching buffer
+std::vector<int16_t> g_iq_flat_buffer;
 std::mutex g_iq_mtx;
 std::condition_variable g_iq_cv;
+
+std::queue<std::vector<int16_t>> g_pcm_queue;
+std::mutex g_pcm_mtx;
+std::condition_variable g_pcm_cv;
 
 std::mutex g_heartbeat_mtx;
 std::condition_variable g_heartbeat_cv;
@@ -38,18 +44,51 @@ std::atomic<long> g_heartbeat_count(0);
 
 SNDFILE* g_wav_file = nullptr;
 std::mutex g_wav_mtx;
+std::atomic<bool> g_wav_write_active(false);
 
 // =======================================================
-// DSP WORKER THREAD
+// REDIS PUBLISH THREAD
+// =======================================================
+void redisPublishWorker() {
+    redisContext* local_redis = redisConnect("ag-redis", 6379);
+    if (!local_redis || local_redis->err) return;
+
+    while (true) {
+        std::vector<int16_t> pcm;
+        {
+            std::unique_lock<std::mutex> lock(g_pcm_mtx);
+            g_pcm_cv.wait(lock, []{ return !g_pcm_queue.empty(); });
+            pcm = std::move(g_pcm_queue.front());
+            g_pcm_queue.pop();
+        }
+
+        if (pcm.empty()) continue;
+
+        std::string payload(reinterpret_cast<const char*>(pcm.data()), pcm.size() * sizeof(int16_t));
+        redisReply* r = (redisReply*)redisCommand(local_redis, "PUBLISH live_audio %b", payload.data(), payload.size());
+        if (r) freeReplyObject(r);
+    }
+}
+
+// =======================================================
+// DSP WORKER (Hybrid: Custom Phase Math + Liquid Resampler)
 // =======================================================
 void dspWorker() {
-    redisContext* local_redis = redisConnect("ag-redis", 6379);
-    
-    float kf = 75000.0f / 2000000.0f; 
-    freqdem demod = freqdem_create(kf);
-    
-    float resamp_ratio = 48000.0f / 2000000.0f;
+    // 1. Resample precisely from 250kHz down to 16kHz
+    float resamp_ratio = 16000.0f / 250000.0f;
     msresamp_rrrf resampler = msresamp_rrrf_create(resamp_ratio, 60.0f);
+
+    // 2. State variables from your old working code
+    float i_state = 0.0f, q_state = 0.0f;
+    float prev_phase = 0.0f;
+    float aa_state1 = 0.0f, aa_state2 = 0.0f, aa_state3 = 0.0f;
+    float de_state = 0.0f;
+
+    // 3. Adjusted Math for 250kHz physics
+    const float iq_alpha = 0.5f;   // Light smoothing
+    const float aa_alpha = 0.2f;   // Audio anti-aliasing
+    const float de_alpha = 0.4545f;
+    const float FM_GAIN  = 0.53f;  // 4.25 divided by 8 to prevent 250kHz phase clipping!
 
     while (true) {
         std::vector<int16_t> raw_iq;
@@ -59,61 +98,85 @@ void dspWorker() {
             raw_iq = std::move(g_iq_queue.front());
             g_iq_queue.pop();
         }
+        g_iq_cv.notify_all();
 
-        size_t num_iq_samples = raw_iq.size() / 2;
-        std::vector<int16_t> pcm_audio_48khz;
-        pcm_audio_48khz.reserve(num_iq_samples * resamp_ratio + 10);
+        size_t numSamples = raw_iq.size() / 2;
+        std::vector<float> audio_demod(numSamples);
 
-        for (size_t i = 0; i < num_iq_samples; i++) {
-            std::complex<float> iq_sample(
-                static_cast<float>(raw_iq[2 * i]) / 32768.0f,
-                static_cast<float>(raw_iq[2 * i + 1]) / 32768.0f
-            );
-            
-            float audio_float = 0.0f;
-            static int dsp_counter = 0;
-            if (g_mode == DeviceMode::RECORDING && dsp_counter++ % 500000 == 0) {
-                std::cout << "[Probe 2: Demod Float] Out: " << audio_float << std::endl;
-            }
-            freqdem_demodulate(demod, iq_sample, &audio_float);
+        for (unsigned int i = 0; i < numSamples; i++) {
+            float bb_i = static_cast<float>(raw_iq[2 * i]);
+            float bb_q = static_cast<float>(raw_iq[2 * i + 1]);
 
-            unsigned int num_written = 0;
-            // THE FIX: Increased from 4 to 16 to prevent internal liquid-dsp stack smashing
-            float resampled_out[16]; 
-            msresamp_rrrf_execute(resampler, &audio_float, 1, resampled_out, &num_written);
+            // 1. Digital Channel Filter
+            i_state = (iq_alpha * bb_i) + ((1.0f - iq_alpha) * i_state);
+            q_state = (iq_alpha * bb_q) + ((1.0f - iq_alpha) * q_state);
 
-            for (unsigned int r = 0; r < num_written; r++) {
-                float val = resampled_out[r] * 8000.0f; 
-                static int pcm_counter = 0;
-                if (g_mode == DeviceMode::RECORDING && pcm_counter++ % 48000 == 0) {
-                    std::cout << "[Probe 3: PCM Scaled] Val: " << val << " | Int: " << static_cast<int16_t>(val) << std::endl;
-                }
-                if (val > 32767.0f) val = 32767.0f;
-                if (val < -32768.0f) val = -32768.0f;
-                pcm_audio_48khz.push_back(static_cast<int16_t>(val));
-            }
+            // 2. Custom FM Demodulation (Now running safely at 250kHz!)
+            float current_phase = std::atan2(q_state, i_state);
+            float phase_diff = current_phase - prev_phase;
+
+            if (phase_diff >  M_PI) phase_diff -= 2.0f * M_PI;
+            if (phase_diff < -M_PI) phase_diff += 2.0f * M_PI;
+            prev_phase = current_phase;
+
+            // 3. Audio Smoothing
+            aa_state1 = (aa_alpha * phase_diff) + ((1.0f - aa_alpha) * aa_state1);
+            aa_state2 = (aa_alpha * aa_state1)  + ((1.0f - aa_alpha) * aa_state2);
+            aa_state3 = (aa_alpha * aa_state2)  + ((1.0f - aa_alpha) * aa_state3);
+
+            audio_demod[i] = aa_state3 * FM_GAIN;
         }
 
-        if (pcm_audio_48khz.empty()) continue;
+        // 4. Liquid-DSP Resampler: Precisely convert 250,000 array to 16,000 array
+        unsigned int max_resamp_out = std::ceil(numSamples * resamp_ratio) + 32;
+        std::vector<float> resamp_out(max_resamp_out);
+        unsigned int num_written = 0;
+        msresamp_rrrf_execute(resampler, audio_demod.data(), numSamples, resamp_out.data(), &num_written);
 
-        if (g_mode == DeviceMode::RECORDING) {
+        // 5. De-emphasis and PCM Scaling
+        std::vector<int16_t> pcm_audio_16khz;
+        pcm_audio_16khz.reserve(num_written);
+        
+        for (unsigned int i = 0; i < num_written; i++) {
+            float raw_audio = resamp_out[i];
+            
+            de_state = (de_alpha * raw_audio) + ((1.0f - de_alpha) * de_state);
+            float pristine_float = de_state; 
+            
+            // Hard clamp to prevent wrapping distortion
+            if (pristine_float > 1.0f) pristine_float = 1.0f;
+            if (pristine_float < -1.0f) pristine_float = -1.0f;
+
+            float live_int = pristine_float * 32767.0f;
+            if (live_int >  32767.0f) live_int =  32767.0f;
+            if (live_int < -32768.0f) live_int = -32768.0f;
+            
+            pcm_audio_16khz.push_back(static_cast<int16_t>(live_int));
+        }
+
+        g_processed_chunks++;
+
+        if (pcm_audio_16khz.empty()) continue;
+
+        if (g_wav_write_active.load()) {
             std::lock_guard<std::mutex> lock(g_wav_mtx);
             if (g_wav_file) {
-                sf_write_short(g_wav_file, pcm_audio_48khz.data(), pcm_audio_48khz.size());
+                sf_write_short(g_wav_file, pcm_audio_16khz.data(), pcm_audio_16khz.size());
             }
-        } 
-        else if (g_mode == DeviceMode::IDLE && local_redis) {
-            std::string payload(reinterpret_cast<const char*>(pcm_audio_48khz.data()), pcm_audio_48khz.size() * sizeof(int16_t));
-            redisReply* r = (redisReply*)redisCommand(local_redis, "PUBLISH live_audio %b", payload.data(), payload.size());
-            if (r) freeReplyObject(r);
+        }
+
+        if (g_mode == DeviceMode::LIVE_LISTEN) {
+            {
+                std::lock_guard<std::mutex> lock(g_pcm_mtx);
+                g_pcm_queue.push(pcm_audio_16khz);
+            }
+            g_pcm_cv.notify_one();
         }
     }
-    freqdem_destroy(demod);
-    msresamp_rrrf_destroy(resampler);
 }
 
 // =======================================================
-// LIGHTWEIGHT USB CALLBACK (MEMORY SAFE)
+// LIGHTWEIGHT IQ CALLBACK
 // =======================================================
 void broadcastAudio(const std::vector<int16_t>& iqBuffer) {
     g_heartbeat_count++;
@@ -121,25 +184,24 @@ void broadcastAudio(const std::vector<int16_t>& iqBuffer) {
 
     if (g_mode == DeviceMode::SCANNING || iqBuffer.empty()) return;
 
-    // THE FIX: Move all vector manipulation safely behind the mutex barrier
-    // This entirely prevents the `double free or corruption` thread collisions.
-    std::lock_guard<std::mutex> lock(g_iq_mtx);
-    
-    // Append the tiny incoming chunk to our flat buffer
-    g_iq_flat_buffer.insert(g_iq_flat_buffer.end(), iqBuffer.begin(), iqBuffer.end());
+    bool should_notify = false;
+    {
+        std::lock_guard<std::mutex> lock(g_iq_mtx);
+        g_iq_flat_buffer.insert(g_iq_flat_buffer.end(), iqBuffer.begin(), iqBuffer.end());
 
-    // Only dispatch to the heavy DSP thread once we hit a dense 8192-sample chunk
-    if (g_iq_flat_buffer.size() >= 8192) {
-        if (g_iq_queue.size() > 50) g_iq_queue.pop(); 
-        static int raw_counter = 0;
-        if (g_mode == DeviceMode::RECORDING && raw_counter++ % 10000 == 0) {
-            std::cout << "[Probe 1: Raw IQ] I: " << iqBuffer[0] << " | Q: " << iqBuffer[1] << std::endl;
+        if (g_iq_flat_buffer.size() >= 16384) {
+            if (g_iq_queue.size() >= 50) {
+                g_iq_flat_buffer.clear();
+                g_iq_flat_buffer.reserve(16384);
+                return;
+            }
+            g_iq_queue.push(std::move(g_iq_flat_buffer));
+            g_iq_flat_buffer = std::vector<int16_t>();
+            g_iq_flat_buffer.reserve(16384);
+            should_notify = true;
         }
-        g_iq_queue.push(std::move(g_iq_flat_buffer));
-        g_iq_flat_buffer = std::vector<int16_t>(); // Create a fresh, safe buffer
-        g_iq_flat_buffer.reserve(8192);            // Pre-allocate for speed
-        g_iq_cv.notify_one();
     }
+    if (should_notify) g_iq_cv.notify_one();
 }
 
 void setBandwidth(SdrHandler* sdr, sdrplay_api_Bw_MHzT bw, sdrplay_api_If_kHzT ifMode) {
@@ -162,7 +224,7 @@ float getValidatedPower(SdrHandler* sdr) {
         return (g_heartbeat_count.load() - start_count) >= 4;
     });
     if (!success) {
-        sdrplay_api_Update(sdr->getDeviceHandle()->dev, sdr->getDeviceHandle()->tuner, 
+        sdrplay_api_Update(sdr->getDeviceHandle()->dev, sdr->getDeviceHandle()->tuner,
                           sdrplay_api_Update_Tuner_Frf, sdrplay_api_Update_Ext1_None);
         return -100.0f;
     }
@@ -180,78 +242,139 @@ void commandListener(SdrHandler* sdr) {
     while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
         if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
             auto json = crow::json::load(reply->element[2]->str);
-            
-            // THE FIX: Protect hiredis from memory leaking unparsed payloads
-            if (!json) {
-                freeReplyObject(reply);
-                continue; 
-            }
-            
+            if (!json) { freeReplyObject(reply); continue; }
             std::string cmd = json["command"].s();
 
-            if (cmd == "TUNE" && g_mode == DeviceMode::IDLE) {
+            if (cmd == "TUNE" && g_mode != DeviceMode::SCANNING) {
                 double f = json["freq"].d();
                 sdr->TuneFrequency(f * 1000000.0);
-            } 
+            }
             else if (cmd == "RECORD" && g_mode == DeviceMode::IDLE) {
                 g_mode = DeviceMode::RECORDING;
                 double targetFreq = json["freq"].d();
-                
+
                 std::thread([sdr, targetFreq]() {
-                    // 1. Prepare Hardware
                     setBandwidth(sdr, sdrplay_api_BW_1_536, sdrplay_api_IF_Zero);
-                    sdr->TuneFrequency(targetFreq * 1000000.0);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500)); 
 
-                    // 2. VERIFY HARDWARE IS ALIVE (The USB Heartbeat Check)
-                    float checkStream = getValidatedPower(sdr);
-                    if (checkStream <= -99.0f) {
-                        std::cerr << "[Recorder] ERROR: USB hardware stalled during tune. Aborting." << std::endl;
-                        g_mode = DeviceMode::IDLE;
-                        return;
+                    sdrplay_api_DeviceParamsT* params = nullptr;
+                    sdrplay_api_GetDeviceParams(sdr->getDeviceHandle()->dev, &params);
+                    if (params && params->rxChannelA) {
+                        // Inherit the exact LNA state the old scanner used!
+                        params->rxChannelA->tunerParams.gain.LNAstate = 4;
+                        params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_50HZ;
+                        params->rxChannelA->ctrlParams.agc.setPoint_dBfs = -30;
+                        sdrplay_api_Update(sdr->getDeviceHandle()->dev, sdr->getDeviceHandle()->tuner,
+                            (sdrplay_api_ReasonForUpdateT)(sdrplay_api_Update_Ctrl_Agc | sdrplay_api_Update_Tuner_Gr),
+                            sdrplay_api_Update_Ext1_None);
                     }
+                    sdr->TuneFrequency(targetFreq * 1000000.0);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-                    // 3. Open the File
-                    std::string filename = "/app/shared/audio.wav";
+                    std::string filename = "/app/shared/audio/audio.wav";
                     SF_INFO sfinfo;
                     sfinfo.channels = 1;
-                    sfinfo.samplerate = 48000;
+                    sfinfo.samplerate = 16000;
                     sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
-                    
+
                     {
                         std::lock_guard<std::mutex> lock(g_wav_mtx);
                         g_wav_file = sf_open(filename.c_str(), SFM_WRITE, &sfinfo);
                     }
 
                     if (g_wav_file) {
-                        std::cout << "[Recorder] Writing 48kHz audio to " << filename << "..." << std::endl;
-                        
-                        // THE FIX: We DO NOT call sdr->dspModule->StartRecording() here anymore.
-                        // The dspWorker thread is already running globally. 
-                        // By setting g_mode to RECORDING, it is actively writing to g_wav_file right now.
-                        
+                        g_wav_write_active = true;
+
+                        std::cout << "[Recorder] Writing clean 48kHz audio to " << filename << "..." << std::endl;
                         std::this_thread::sleep_for(std::chrono::seconds(30));
-                        
-                        // Safely close the file handle
-                        std::lock_guard<std::mutex> lock(g_wav_mtx);
-                        sf_close(g_wav_file);
-                        g_wav_file = nullptr;
-                        
+
+                        g_mode = DeviceMode::IDLE;
+
+                        {
+                            std::lock_guard<std::mutex> lock(g_iq_mtx);
+                            if (!g_iq_flat_buffer.empty()) {
+                                g_iq_queue.push(std::move(g_iq_flat_buffer));
+                                g_iq_flat_buffer.clear();
+                                g_iq_flat_buffer.reserve(16384);
+                            }
+                        }
+                        g_iq_cv.notify_one();
+
+                        {
+                            std::unique_lock<std::mutex> lock(g_iq_mtx);
+                            g_iq_cv.wait(lock, []{ return g_iq_queue.empty(); });
+                        }
+
+                        g_wav_write_active = false;
+                        {
+                            std::lock_guard<std::mutex> lock(g_wav_mtx);
+                            sf_close(g_wav_file);
+                            g_wav_file = nullptr;
+                        }
+
+                        std::cout << "[Recorder] Finished writing 30 seconds." << std::endl;
+
                         crow::json::wvalue msg;
-                        msg["event"] = "record_complete"; 
+                        msg["event"] = "record_complete";
                         msg["freq"] = targetFreq;
                         msg["file"] = filename;
-                        
+
                         std::lock_guard<std::mutex> r_lock(g_redis_pub_mtx);
                         redisReply* r = (redisReply*)redisCommand(g_redis_pub, "PUBLISH ws_updates %s", msg.dump().c_str());
                         if (r) freeReplyObject(r);
-                        
-                        std::cout << "[Recorder] Recording Finished." << std::endl;
                     } else {
-                        std::cerr << "[Recorder] ERROR: Failed to open " << filename << std::endl;
+                        g_mode = DeviceMode::IDLE;
                     }
-                    g_mode = DeviceMode::IDLE;
                 }).detach();
+            }
+            else if (cmd == "LIVE_LISTEN" && g_mode == DeviceMode::IDLE) {
+                g_mode = DeviceMode::LIVE_LISTEN;
+
+                // 1. EXTRACT FREQUENCY: Actually grab the station from the React JSON
+                double targetFreq = json.has("freq") ? json["freq"].d() : 88.1;
+
+                std::thread([sdr, targetFreq]() {
+                    // 2. DODGE THE SPIKE: Push the DC electrical offset 450kHz away
+                    setBandwidth(sdr, sdrplay_api_BW_1_536, sdrplay_api_IF_Zero);
+
+                    sdrplay_api_DeviceParamsT* params = nullptr;
+                    sdrplay_api_GetDeviceParams(sdr->getDeviceHandle()->dev, &params);
+                    if (params && params->rxChannelA) {
+                        // Inherit the exact LNA state the old scanner used!
+                        params->rxChannelA->tunerParams.gain.LNAstate = 4;
+                        params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_50HZ;
+                        params->rxChannelA->ctrlParams.agc.setPoint_dBfs = -30;
+                        sdrplay_api_Update(sdr->getDeviceHandle()->dev, sdr->getDeviceHandle()->tuner,
+                            (sdrplay_api_ReasonForUpdateT)(sdrplay_api_Update_Ctrl_Agc | sdrplay_api_Update_Tuner_Gr),
+                            sdrplay_api_Update_Ext1_None);
+                    }
+
+                    // 4. TUNE: Actually command the hardware to change to the station!
+                    sdr->TuneFrequency(targetFreq * 1000000.0);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Let the tuner settle
+
+                    // 5. YOUR STABLE WAV LOGIC
+                    std::string filename = "/app/shared/audio/live.wav";
+                    SF_INFO sfinfo;
+                    sfinfo.channels = 1; sfinfo.samplerate = 16000; sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
+                    {
+                        std::lock_guard<std::mutex> lock(g_wav_mtx);
+                        g_wav_file = sf_open(filename.c_str(), SFM_WRITE, &sfinfo);
+                        g_wav_write_active = true;
+                    }
+                    std::cout << "[Live] Streaming " << targetFreq << " MHz to Redis AND saving to " << filename << std::endl;
+                }).detach();
+            }
+            else if (cmd == "STOP_LIVE" && g_mode == DeviceMode::LIVE_LISTEN) {
+                g_mode = DeviceMode::IDLE;
+                g_wav_write_active = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_wav_mtx);
+                    if (g_wav_file) {
+                        sf_close(g_wav_file);
+                        g_wav_file = nullptr;
+                    }
+                }
+                std::cout << "[Live] Stopped." << std::endl;
             }
             else if (cmd == "SCAN" && g_mode == DeviceMode::IDLE) {
                 g_mode = DeviceMode::SCANNING;
@@ -355,22 +478,24 @@ void commandListener(SdrHandler* sdr) {
                 }).detach();
             }
         }
-        if (reply) freeReplyObject(reply); // Ensures parsed replies are always safely destroyed
+        if (reply) freeReplyObject(reply);
     }
     redisFree(c);
 }
 
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
-    
+
     g_redis_pub = redisConnect("ag-redis", 6379);
+
     std::thread(dspWorker).detach();
+    std::thread(redisPublishWorker).detach();
 
     SdrHandler sdr;
     if (!sdr.InitializeAPI()) return 1;
     if (!sdr.StartStream(88000000.0)) return 1;
 
-    std::cout << "[SDR] Docker Microservice Active. Memory protections engaged." << std::endl;
+    std::cout << "[SDR] Docker Microservice Active. Pipeline Ready." << std::endl;
     commandListener(&sdr);
 
     return 0;

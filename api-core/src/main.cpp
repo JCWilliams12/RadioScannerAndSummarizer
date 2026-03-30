@@ -28,17 +28,13 @@ void redisListenerThread() {
     if (reply) freeReplyObject(reply);
 
     while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
-        // SAFETY CHECK: Ensure we have a valid 3-element array message
         if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
-            
-            // Check if this is a DATA message (not a "subscribe" confirmation)
             std::string type = reply->element[0]->str ? reply->element[0]->str : "";
             
             if (type == "message") {
                 std::string channel = reply->element[1]->str ? reply->element[1]->str : "";
                 
                 if (channel == "live_audio") {
-                    // Use length for binary audio safety
                     std::string payload(reply->element[2]->str, reply->element[2]->len);
                     std::lock_guard<std::mutex> lock(ws_audio_mtx);
                     for (auto client : audio_clients) {
@@ -84,7 +80,6 @@ int main() {
 
     std::thread(redisListenerThread).detach();
 
-    // --- All Routes (Same as monolith main (1).cpp) ---
     CROW_WEBSOCKET_ROUTE(app, "/ws/audio")
     .onopen([&](crow::websocket::connection& conn) { std::lock_guard<std::mutex> lock(ws_audio_mtx); audio_clients.insert(&conn); })
     .onclose([&](crow::websocket::connection& conn, const std::string&) { std::lock_guard<std::mutex> lock(ws_audio_mtx); audio_clients.erase(&conn); });
@@ -99,7 +94,22 @@ int main() {
         crow::json::wvalue cmd; cmd["command"] = "TUNE"; cmd["freq"] = x["freq"].d();
         std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
         redisCommand(g_redis_pub, "PUBLISH sdr_commands %s", cmd.dump().c_str());
-        return makeCorsResponse(200);
+        return makeCorsResponse({{"status", "tuned"}});
+    });
+
+    // FIX: New route to start and stop live listen mode.
+    // Previously the frontend had no way to send a LIVE_LISTEN or STOP_LIVE
+    // command to the SDR daemon, so g_mode never entered LIVE_LISTEN and
+    // dspWorker never published PCM to Redis. The WebSocket received silence.
+    CROW_ROUTE(app, "/api/scan/live").methods(crow::HTTPMethod::Post)
+    ([](const crow::request& req) {
+        auto x = crow::json::load(req.body); if (!x) return crow::response(400);
+        std::string action = x["action"].s(); // "start" or "stop"
+        crow::json::wvalue cmd;
+        cmd["command"] = (action == "start") ? "LIVE_LISTEN" : "STOP_LIVE";
+        std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
+        redisCommand(g_redis_pub, "PUBLISH sdr_commands %s", cmd.dump().c_str());
+        return makeCorsResponse({{"status", action == "start" ? "live_started" : "live_stopped"}});
     });
 
     CROW_ROUTE(app, "/api/scan/record").methods(crow::HTTPMethod::Post)
@@ -113,7 +123,6 @@ int main() {
 
     CROW_ROUTE(app, "/api/scan/wideband")
     ([]() {
-        // 1. Tell the SDR Daemon to start the sweep
         crow::json::wvalue cmd;
         cmd["command"] = "SCAN";
         {
@@ -121,22 +130,18 @@ int main() {
             redisCommand(g_redis_pub, "PUBLISH sdr_commands %s", cmd.dump().c_str());
         }
 
-        // 2. BLOCK THE HTTP REQUEST: Wait for the daemon to finish
-        // This forces the React frontend to stay on the loading screen!
         redisContext *sub = redisConnect("ag-redis", 6379);
         redisReply *reply = (redisReply*)redisCommand(sub, "SUBSCRIBE ws_updates");
         if (reply) freeReplyObject(reply);
 
         crow::json::wvalue final_stations;
         
-        // Listen to Redis until the 'scan_complete' event arrives
         while (redisGetReply(sub, (void**)&reply) == REDIS_OK) {
             if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
                 std::string msg_type = reply->element[0]->str;
                 if (msg_type == "message") {
                     auto data = crow::json::load(reply->element[2]->str);
                     if (data && data["event"].s() == "scan_complete") {
-                        // Capture the stations and break the blocking loop
                         final_stations = std::move(data["stations"]);
                         freeReplyObject(reply);
                         break; 
@@ -147,10 +152,8 @@ int main() {
         }
         redisFree(sub);
 
-        // 3. Return the payload to React, allowing the UI to transition safely
         crow::json::wvalue res;
         res["stations"] = std::move(final_stations);
-        
         crow::response response(res);
         response.add_header("Access-Control-Allow-Origin", "*");
         return response;

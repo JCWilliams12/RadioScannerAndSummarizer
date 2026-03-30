@@ -261,13 +261,10 @@ function App() {
     }
   };
 
-
-
   useEffect(() => {
     fetchStations();
     fetchLogs(); 
   }, []);
-
 
   // Close Playback menu when clicking outside of it
   useEffect(() => {
@@ -288,7 +285,6 @@ function App() {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [showPlaybackMenu]);
-
   
   // WIDEBAND FM SPECTRUM SWEEP
   const handleWidebandSweep = async () => {
@@ -316,7 +312,10 @@ function App() {
   // LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
   useEffect(() => {
     if (isListeningLive && selectedStation) {
-      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      // FIX: Force the AudioContext to match the backend 48kHz output
+      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 16000
+      });
 
       // Reset the scheduler so the first chunk plays immediately
       nextPlayTimeRef.current = 0;
@@ -328,6 +327,7 @@ function App() {
         if (!audioCtxRef.current) return;
         
         const pcm16 = new Int16Array(event.data);
+        // FIX: Buffer set to exactly 16000 Hz to prevent playback distortion
         const audioBuffer = audioCtxRef.current.createBuffer(1, pcm16.length, 16000);
         const channelData = audioBuffer.getChannelData(0);
         for (let i = 0; i < pcm16.length; i++) {
@@ -338,7 +338,7 @@ function App() {
         source.buffer = audioBuffer;
         source.connect(audioCtxRef.current.destination);
 
-        // --- FIX: Schedule chunks back-to-back using a running clock ---
+        // --- Schedule chunks back-to-back using a running clock ---
         const currentTime = audioCtxRef.current.currentTime;
         if (nextPlayTimeRef.current < currentTime) {
           // Fell behind (underrun) - re-sync with a small 50ms buffer
@@ -348,13 +348,15 @@ function App() {
         nextPlayTimeRef.current += audioBuffer.duration;
       };
 
-      fetch('/api/scan/tune', {
+      // FIX: Trigger the LIVE_LISTEN command on the backend explicitly
+      fetch('/api/scan/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ freq: parseFloat(selectedStation.freq) })
-      }).catch(err => console.error("Hardware tuning error:", err));
+        body: JSON.stringify({ action: 'start', freq: parseFloat(selectedStation.freq) })
+      }).catch(err => console.error("Hardware live start error:", err));
       
     } else {
+      // Clean up connections
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -363,11 +365,26 @@ function App() {
         audioCtxRef.current.close();
         audioCtxRef.current = null;
       }
+      
+      // FIX: Ensure backend terminates the live listen stream when off
+      fetch('/api/scan/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' })
+      }).catch(err => console.error("Hardware live stop error:", err));
     }
 
     return () => {
+      // Ensure strict cleanup on component unmount
       if (wsRef.current) wsRef.current.close();
       if (audioCtxRef.current) audioCtxRef.current.close();
+      if (isListeningLive) {
+        fetch('/api/scan/live', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'stop' })
+        }).catch(err => console.error("Hardware live stop error:", err));
+      }
     };
   }, [isListeningLive, selectedStation]);
 
@@ -390,8 +407,7 @@ function App() {
     };
   }, [showPlaybackMenu, selectedLog]);
 
-  // THE 3-STEP SCAN HANDLER (Record -> Transcribe -> Summarize)
-// --- NEW: Status WebSocket Listener ---
+  // --- NEW: Status WebSocket Listener ---
   useEffect(() => {
     const statusWs = new WebSocket(`ws://${window.location.host}/ws/status`);
     
@@ -780,7 +796,6 @@ function App() {
                 {isScanningBand ? "Sweeping Spectrum (88-108 MHz)..." : "Auto-Find Stations"}
               </button>
 
-              {/* Zeroed out default browser list spacing and made it scrollable */}
               <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none' }}>
                 {stations.map(s => (
                   <li 

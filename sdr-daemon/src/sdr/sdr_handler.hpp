@@ -1,13 +1,11 @@
 #pragma once
 #include <sdrplay_api.h>
+#include <vector>
+#include <mutex>
 #include <iostream>
 #include <atomic>
-#include <thread>
-#include <chrono>
-#include <vector>
-#include <numeric>
-#include <mutex>
-#include "../iqtowav/iqtowav.hpp"
+
+#define POWER_HISTORY_SIZE 100
 
 class SdrHandler {
 public:
@@ -18,45 +16,28 @@ public:
     bool StartStream(double startFreqHz);
     bool TuneFrequency(double newFreqHz);
     void ShutdownSDR();
-    bool isStreaming;
-
-    // Returns a stable averaged power reading across recent callbacks
-    float GetCurrentPower() const {
+    float GetCurrentPower() {
         std::lock_guard<std::mutex> lock(powerMutex);
-        if (powerHistory.empty()) return -100.0f;
-        float sum = 0.0f;
-        for (float v : powerHistory) sum += v;
-        return sum / static_cast<float>(powerHistory.size());
+        return powerHistory.empty() ? -100.0f : powerHistory.back();
     }
-
-    // Call this immediately after TuneFrequency() to discard stale readings
     void ClearPowerHistory() {
         std::lock_guard<std::mutex> lock(powerMutex);
         powerHistory.clear();
     }
 
     sdrplay_api_DeviceT* getDeviceHandle() { return &chosenDevice; }
-
-    IqToWav* dspModule;
+    std::atomic<bool> isStreaming;
 
 private:
-    sdrplay_api_DeviceParamsT* deviceParams;
     sdrplay_api_DeviceT chosenDevice;
+    sdrplay_api_DeviceParamsT* deviceParams;
+    
+    std::vector<float> powerHistory;
+    std::mutex powerMutex;
     
 
-    // Rolling power history - stores last N callback readings
-    // N=8 at ~4ms/callback = ~32ms averaging window, stable but responsive
-    mutable std::mutex powerMutex;
-    std::vector<float> powerHistory;
-    static constexpr int POWER_HISTORY_SIZE = 8;
-
-    static void StreamCallback(short *xi, short *xq,
-                               sdrplay_api_StreamCbParamsT *params,
-                               unsigned int numSamples,
-                               unsigned int reset, void *cbContext);
-
-    static void EventCallback(sdrplay_api_EventT eventId,
-                              sdrplay_api_TunerSelectT tuner,
-                              sdrplay_api_EventParamsT *params,
-                              void *cbContext);
+    static void StreamCallback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
+                               unsigned int numSamples, unsigned int reset, void *cbContext);
+    static void EventCallback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tuner,
+                              sdrplay_api_EventParamsT *params, void *cbContext);
 };

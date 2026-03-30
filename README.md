@@ -27,3 +27,5 @@ Paste the following into terminal:
 cd client
 npm install
 npm run dev
+
+usbipd attach --wsl --busid <BUSID>
