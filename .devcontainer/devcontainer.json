@@ -12,5 +12,6 @@
             ]
         }
     },
-    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y libboost-all-dev libasio-dev libsqlite3-dev"
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y libboost-all-dev libasio-dev libsqlite3-dev",
+    "remoteUser": "vscode"
 }

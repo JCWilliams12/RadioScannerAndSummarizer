@@ -40,4 +40,4 @@ RUN mkdir -p build && cd build && \
     make -j$(nproc)
 
 # 6. Start the Service and the Daemon (Using absolute path to service)
-CMD sh -c "/opt/sdrplay_api/sdrplay_apiService & sleep 2 && ./build/sdr_daemon"
+CMD sh -c "sudo /opt/sdrplay_api/sdrplay_apiService & sleep 2 && ./build/sdr_daemon"
