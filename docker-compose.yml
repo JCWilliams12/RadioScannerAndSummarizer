@@ -15,7 +15,7 @@ services:
       dockerfile: api-core/Dockerfile
     container_name: ag-api
     ports:
-      - "8080:8080" # Keeping it on 8080 so React doesn't break
+      - "8080:8080"
     volumes:
       - ./shared-data:/app/shared
     env_file:
@@ -44,12 +44,12 @@ services:
       context: .
       dockerfile: sdr-daemon/Dockerfile
     container_name: ag-sdr-live
-    privileged: true
-    ipc: host                  
-    shm_size: '512m'           
-    ulimits:                   
-      rtprio: 99
-      memlock: -1
+    privileged: true          # Covers SYS_NICE — no cap_add needed
+    ipc: host
+    shm_size: '512m'
+    ulimits:
+      rtprio: 99              # Allows SCHED_FIFO up to priority 99
+      memlock: -1             # Unlimited memory lock, reduces paging jitter
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       - ./shared-data:/app/shared

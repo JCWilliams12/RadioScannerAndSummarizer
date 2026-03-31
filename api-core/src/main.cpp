@@ -104,9 +104,15 @@ int main() {
     CROW_ROUTE(app, "/api/scan/live").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto x = crow::json::load(req.body); if (!x) return crow::response(400);
-        std::string action = x["action"].s(); // "start" or "stop"
+        std::string action = x["action"].s();
+
         crow::json::wvalue cmd;
         cmd["command"] = (action == "start") ? "LIVE_LISTEN" : "STOP_LIVE";
+
+        if (action == "start" && x.has("freq")) {
+            cmd["freq"] = x["freq"].d();
+        }
+
         std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
         redisCommand(g_redis_pub, "PUBLISH sdr_commands %s", cmd.dump().c_str());
         return makeCorsResponse({{"status", action == "start" ? "live_started" : "live_stopped"}});
