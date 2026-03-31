@@ -12,6 +12,11 @@
 #include "dbcorefilter.hpp"
 #include "crow.h"
 
+// 1. Include SQLite for the seed function
+extern "C" {
+    #include "sqlite3.h"
+}
+
 std::mutex ws_audio_mtx;
 std::unordered_set<crow::websocket::connection*> audio_clients;
 std::mutex ws_status_mtx;
@@ -19,6 +24,37 @@ std::unordered_set<crow::websocket::connection*> status_clients;
 
 redisContext *g_redis_pub = nullptr;
 std::mutex g_redis_pub_mtx;
+
+// ==========================================
+// DB SEED FUNCTION
+// ==========================================
+void seedDatabase() {
+    // SMART SEED: Only inject if the database is completely empty!
+    if (!getAllLogs().empty()) {
+        std::cout << "[API] Database already has data. Skipping seed." << std::endl;
+        return;
+    }
+
+    sqlite3 *db;
+    if (sqlite3_open(DB_NAME, &db) == SQLITE_OK) {
+        const char* sql = 
+            "INSERT INTO RadioLogs (freq, time, location, rawT, summary, channelName) VALUES "
+            "(154.280, strftime('%s', 'now'), 'North Precinct', 'Officer needs assistance.', 'Officer request', 'Bham Police 1'),"
+            "(462.562, strftime('%s', 'now', '-5 minutes'), 'Greystone', 'Order is ready at window two.', 'Drive-thru comms', 'Fast Food Ops'),"
+            "(160.230, strftime('%s', 'now', '-1 hour'), 'Rail Yard', 'Train 42 is cleared on track 3.', 'Train clearance', 'Railroad Ch 1');";
+        
+        char* errMsg = nullptr;
+        if (sqlite3_exec(db, sql, 0, 0, &errMsg) != SQLITE_OK) {
+            std::cerr << "[API] Seed error: " << errMsg << std::endl;
+            sqlite3_free(errMsg);
+        } else {
+            std::cout << "[API] Successfully injected test cases into the database!" << std::endl;
+        }
+        sqlite3_close(db);
+    } else {
+        std::cerr << "[API] Failed to open DB for seeding." << std::endl;
+    }
+}
 
 void redisListenerThread() {
     redisContext *c = redisConnect("ag-redis", 6379);
@@ -28,17 +64,13 @@ void redisListenerThread() {
     if (reply) freeReplyObject(reply);
 
     while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
-        // SAFETY CHECK: Ensure we have a valid 3-element array message
         if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
-            
-            // Check if this is a DATA message (not a "subscribe" confirmation)
             std::string type = reply->element[0]->str ? reply->element[0]->str : "";
             
             if (type == "message") {
                 std::string channel = reply->element[1]->str ? reply->element[1]->str : "";
                 
                 if (channel == "live_audio") {
-                    // Use length for binary audio safety
                     std::string payload(reply->element[2]->str, reply->element[2]->len);
                     std::lock_guard<std::mutex> lock(ws_audio_mtx);
                     for (auto client : audio_clients) {
@@ -74,6 +106,9 @@ int main() {
         return 1;
     }
 
+    // 2. Trigger the seed function automatically on startup
+    seedDatabase();
+
     std::cout << "[API] Connecting to Redis..." << std::endl;
     for(int i=0; i<5; i++) {
         g_redis_pub = redisConnect("ag-redis", 6379);
@@ -84,14 +119,13 @@ int main() {
 
     std::thread(redisListenerThread).detach();
 
-    // --- All Routes (Same as monolith main (1).cpp) ---
     CROW_WEBSOCKET_ROUTE(app, "/ws/audio")
-    .onopen([&](crow::websocket::connection& conn) { std::lock_guard<std::mutex> lock(ws_audio_mtx); audio_clients.insert(&conn); })
-    .onclose([&](crow::websocket::connection& conn, const std::string&) { std::lock_guard<std::mutex> lock(ws_audio_mtx); audio_clients.erase(&conn); });
+    .onopen([](crow::websocket::connection& conn) { std::lock_guard<std::mutex> lock(ws_audio_mtx); audio_clients.insert(&conn); })
+    .onclose([](crow::websocket::connection& conn, const std::string&) { std::lock_guard<std::mutex> lock(ws_audio_mtx); audio_clients.erase(&conn); });
 
     CROW_WEBSOCKET_ROUTE(app, "/ws/status")
-    .onopen([&](crow::websocket::connection& conn) { std::lock_guard<std::mutex> lock(ws_status_mtx); status_clients.insert(&conn); })
-    .onclose([&](crow::websocket::connection& conn, const std::string&) { std::lock_guard<std::mutex> lock(ws_status_mtx); status_clients.erase(&conn); });
+    .onopen([](crow::websocket::connection& conn) { std::lock_guard<std::mutex> lock(ws_status_mtx); status_clients.insert(&conn); })
+    .onclose([](crow::websocket::connection& conn, const std::string&) { std::lock_guard<std::mutex> lock(ws_status_mtx); status_clients.erase(&conn); });
 
     CROW_ROUTE(app, "/api/scan/tune").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
@@ -113,7 +147,6 @@ int main() {
 
     CROW_ROUTE(app, "/api/scan/wideband")
     ([]() {
-        // 1. Tell the SDR Daemon to start the sweep
         crow::json::wvalue cmd;
         cmd["command"] = "SCAN";
         {
@@ -121,22 +154,18 @@ int main() {
             redisCommand(g_redis_pub, "PUBLISH sdr_commands %s", cmd.dump().c_str());
         }
 
-        // 2. BLOCK THE HTTP REQUEST: Wait for the daemon to finish
-        // This forces the React frontend to stay on the loading screen!
         redisContext *sub = redisConnect("ag-redis", 6379);
         redisReply *reply = (redisReply*)redisCommand(sub, "SUBSCRIBE ws_updates");
         if (reply) freeReplyObject(reply);
 
         crow::json::wvalue final_stations;
         
-        // Listen to Redis until the 'scan_complete' event arrives
         while (redisGetReply(sub, (void**)&reply) == REDIS_OK) {
             if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
                 std::string msg_type = reply->element[0]->str;
                 if (msg_type == "message") {
                     auto data = crow::json::load(reply->element[2]->str);
                     if (data && data["event"].s() == "scan_complete") {
-                        // Capture the stations and break the blocking loop
                         final_stations = std::move(data["stations"]);
                         freeReplyObject(reply);
                         break; 
@@ -147,7 +176,6 @@ int main() {
         }
         redisFree(sub);
 
-        // 3. Return the payload to React, allowing the UI to transition safely
         crow::json::wvalue res;
         res["stations"] = std::move(final_stations);
         
@@ -170,11 +198,63 @@ int main() {
         return makeCorsResponse(res);
     });
 
-    CROW_ROUTE(app, "/api/search")
+    CROW_ROUTE(app, "/api/filter/channel")
+    ([](const crow::request& req) {
+        std::string channel = req.url_params.get("name") ? req.url_params.get("name") : "";
+        if (channel.empty()) return makeCorsResponse(crow::json::wvalue::list());
+
+        std::vector<RadioLog> logs = filterByChannelName(channel);
+        crow::json::wvalue res;
+        
+        if (logs.empty()) {
+            res = crow::json::wvalue::list();
+        } else {
+            for (size_t i = 0; i < logs.size(); i++) {
+                res[i]["freq"]     = logs[i].freq;
+                res[i]["time"]     = logs[i].time;
+                res[i]["location"] = logs[i].location;
+                res[i]["name"]     = logs[i].channelName;
+                res[i]["summary"]  = logs[i].summary;
+                res[i]["rawT"]     = logs[i].rawT;
+            }
+        }
+        return makeCorsResponse(res); 
+    });
+
+CROW_ROUTE(app, "/api/search")
     ([](const crow::request& req) {
         std::string q = req.url_params.get("q") ? req.url_params.get("q") : "";
         std::vector<RadioLog> logs;
-        try { logs = filterByFrequency(std::stod(q)); } catch (...) { logs = filterByLocation(q); }
+
+        // If the search bar is empty, just return everything
+        if (q.empty()) {
+            logs = getAllLogs();
+        } else {
+            try { 
+                logs = filterByFrequency(std::stod(q)); 
+            } catch (...) { 
+                auto locLogs = filterByLocation(q);
+                auto chanLogs = filterByChannelName(q);
+                
+                logs = std::move(locLogs);
+                
+                // DEDUPLICATION LOOP: Only add channel logs if they aren't already in the list
+                for (const auto& chanLog : chanLogs) {
+                    bool isDuplicate = false;
+                    for (const auto& existingLog : logs) {
+                        // If they have the exact same time and freq, they are the same log
+                        if (existingLog.time == chanLog.time && existingLog.freq == chanLog.freq) {
+                            isDuplicate = true;
+                            break;
+                        }
+                    }
+                    if (!isDuplicate) {
+                        logs.push_back(chanLog);
+                    }
+                }
+            }
+        }
+        
         crow::json::wvalue res;
         if (logs.empty()) res = crow::json::wvalue::list();
         else {
@@ -184,9 +264,64 @@ int main() {
                 res[i]["summary"] = logs[i].summary; res[i]["name"] = logs[i].channelName;
             }
         }
-        return makeCorsResponse(res);
+        return makeCorsResponse(res); 
     });
 
+    // 3. Optional: Hit this route to seed the database manually anytime!
+    CROW_ROUTE(app, "/api/dev/seed").methods(crow::HTTPMethod::Post, crow::HTTPMethod::Get)
+    ([]() {
+        seedDatabase();
+        return makeCorsResponse({{"status", "database_seeded_successfully"}});
+    });
+
+    // --- DELETE LOG ROUTE ---
+    CROW_ROUTE(app, "/api/logs/delete").methods(crow::HTTPMethod::Post)
+    ([](const crow::request& req) {
+        auto body = crow::json::load(req.body);
+        if (!body) return makeCorsResponse({{"status", "error"}, {"message", "Invalid JSON"}}, 400);
+
+        double freq = body["freq"].d();
+        long long time = body["time"].i();
+        std::string location = body["location"].s();
+
+        if (removeLog(freq, time, location)) {
+            return makeCorsResponse({{"status", "success"}});
+        } else {
+            return makeCorsResponse({{"status", "error"}, {"message", "Log not found"}}, 404);
+        }
+    });
+
+    // --- SAVE LOG ROUTE ---
+    CROW_ROUTE(app, "/api/logs/save").methods(crow::HTTPMethod::Post)
+    ([](const crow::request& req) {
+        auto body = crow::json::load(req.body);
+        if (!body) return makeCorsResponse({{"status", "error"}, {"message", "Invalid JSON"}}, 400);
+
+        double freq = body["freq"].d();
+        long long time = body["time"].i();
+        std::string location = body["location"].s();
+        std::string rawT = body["rawT"].s();
+        std::string summary = body["summary"].s();
+        std::string channelName = body["channelName"].s();
+
+        // Call the insertLog function from dbcorefunctions.cpp
+        insertLog(freq, time, location, rawT, summary, channelName);
+        
+        return makeCorsResponse({{"status", "success"}});
+    });
+
+    // The Database Nuke Route
+    CROW_ROUTE(app, "/api/dev/clear").methods(crow::HTTPMethod::Post, crow::HTTPMethod::Get)
+    ([]() {
+        sqlite3 *db;
+        if (sqlite3_open(DB_NAME, &db) == SQLITE_OK) {
+            // This SQL command deletes every single row inside the table permanently
+            sqlite3_exec(db, "DELETE FROM RadioLogs;", 0, 0, 0);
+            sqlite3_close(db);
+        }
+        return makeCorsResponse({{"status", "database_wiped_clean"}});
+    });
+    
     CROW_ROUTE(app, "/stations")([]() { return makeCorsResponse(crow::json::wvalue::list()); });
 
     std::cout << "[API] Gateway online at http://0.0.0.0:8080" << std::endl;
