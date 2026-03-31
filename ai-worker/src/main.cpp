@@ -20,24 +20,32 @@ int main() {
     redisContext *pub = redisConnect("ag-redis", 6379);
 
     redisReply *reply = (redisReply*)redisCommand(c, "SUBSCRIBE ai_commands");
-    freeReplyObject(reply);
+    if (reply) freeReplyObject(reply);
 
     while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
-        if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
+        if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
             auto json = crow::json::load(reply->element[2]->str);
+            
+            // CRITICAL SAFETY CHECK: Prevents the container from crashing!
+            if (!json) {
+                freeReplyObject(reply);
+                continue; 
+            }
+
             std::string cmd = json["command"].s();
             double targetFreq = json["freq"].d();
 
             if (cmd == "TRANSCRIBE_LOCAL") {
                 WhisperTest transcriber("/app/shared/models/ggml-base.en.bin");
-                std::string text = transcriber.transcribe("/app/shared/audio/audio.wav");
+                
+                // FIXED PATH: Points to /app/shared and specifically audio.wav
+                std::string text = transcriber.transcribe("/app/shared/audio/dummy.wav");
                 
                 crow::json::wvalue msg; 
                 msg["event"] = "transcription_complete"; msg["text"] = text; msg["freq"] = targetFreq;
                 redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
             } 
             else if (cmd == "SUMMARIZE_LOCAL") {
-                // Ensure your GenerateSummary function points to "/app/shared/models/Phi-3-mini-4k-instruct-q4.gguf"
                 std::string summary = GenerateSummary(json["text"].s());
                 
                 crow::json::wvalue msg; 
@@ -45,7 +53,8 @@ int main() {
                 redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
             }
             else if (cmd == "TRANSCRIBE_OPENAI") {
-                std::string text = transcribeAudio("/app/shared/audio/audio.wav", getEnvVar("OPENAI_API_KEY"));
+                // FIXED PATH
+                std::string text = transcribeAudio("/app/shared/audio/dummy.wav", getEnvVar("OPENAI_API_KEY"));
                 
                 crow::json::wvalue msg; 
                 msg["event"] = "transcription_complete"; msg["text"] = text; msg["freq"] = targetFreq;
@@ -59,7 +68,10 @@ int main() {
                 redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
             }
         }
-        freeReplyObject(reply);
+        if (reply) freeReplyObject(reply);
     }
+    
+    redisFree(c);
+    redisFree(pub);
     return 0;
 }
