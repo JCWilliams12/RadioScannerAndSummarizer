@@ -22,44 +22,59 @@ int main() {
     redisReply *reply = (redisReply*)redisCommand(c, "SUBSCRIBE ai_commands");
     freeReplyObject(reply);
 
-    while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
-        if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
+while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
+        if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
             auto json = crow::json::load(reply->element[2]->str);
+            if (!json) {
+                freeReplyObject(reply);
+                continue; 
+            }
+
             std::string cmd = json["command"].s();
             double targetFreq = json["freq"].d();
 
+            // ---> THE NEW HEARTBEAT LOG <---
+            std::cout << "\n[AI Worker] Received command: " << cmd << " for " << targetFreq << " MHz" << std::endl;
+
             if (cmd == "TRANSCRIBE_LOCAL") {
+                std::cout << "[AI Worker] Starting Local Whisper..." << std::endl;
                 WhisperTest transcriber("/app/shared/models/ggml-base.en.bin");
-                std::string text = transcriber.transcribe("/app/shared/audio/audio.wav");
+                std::string text = transcriber.transcribe("/app/shared/audio/dummy.wav");
+                std::cout << "[AI Worker] Local Whisper Output: " << text << std::endl;
                 
                 crow::json::wvalue msg; 
                 msg["event"] = "transcription_complete"; msg["text"] = text; msg["freq"] = targetFreq;
                 redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
             } 
             else if (cmd == "SUMMARIZE_LOCAL") {
-                // Ensure your GenerateSummary function points to "/app/shared/models/Phi-3-mini-4k-instruct-q4.gguf"
+                std::cout << "[AI Worker] Starting Local Phi-3..." << std::endl;
                 std::string summary = GenerateSummary(json["text"].s());
+                std::cout << "[AI Worker] Local Phi-3 Output: " << summary << std::endl;
                 
                 crow::json::wvalue msg; 
                 msg["event"] = "summary_complete"; msg["summary"] = summary; msg["freq"] = targetFreq;
                 redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
             }
             else if (cmd == "TRANSCRIBE_OPENAI") {
-                std::string text = transcribeAudio("/app/shared/audio/audio.wav", getEnvVar("OPENAI_API_KEY"));
+                std::cout << "[AI Worker] Sending audio to OpenAI API..." << std::endl;
+                std::string text = transcribeAudio("/app/shared/audio/dummy.wav", getEnvVar("OPENAI_API_KEY"));
+                std::cout << "[AI Worker] OpenAI API Response: " << text << std::endl;
                 
                 crow::json::wvalue msg; 
                 msg["event"] = "transcription_complete"; msg["text"] = text; msg["freq"] = targetFreq;
                 redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
             }
             else if (cmd == "SUMMARIZE_OPENAI") {
+                std::cout << "[AI Worker] Sending text to OpenAI API..." << std::endl;
                 std::string summary = summarizeText(json["text"].s(), getEnvVar("OPENAI_API_KEY"));
+                std::cout << "[AI Worker] OpenAI API Response: " << summary << std::endl;
                 
                 crow::json::wvalue msg; 
                 msg["event"] = "summary_complete"; msg["summary"] = summary; msg["freq"] = targetFreq;
                 redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
             }
         }
-        freeReplyObject(reply);
+        if (reply) freeReplyObject(reply);
     }
     return 0;
 }
