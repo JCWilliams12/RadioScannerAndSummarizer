@@ -322,6 +322,68 @@ CROW_ROUTE(app, "/api/search")
         return makeCorsResponse({{"status", "database_wiped_clean"}});
     });
     
+    // ==========================================
+    // AI PIPELINE ROUTES (Bridges React to Redis)
+    // ==========================================
+
+    CROW_ROUTE(app, "/api/transcribe/local").methods(crow::HTTPMethod::Post)
+    ([](const crow::request& req) {
+        auto body = crow::json::load(req.body);
+        if (!body) return makeCorsResponse({{"status", "error"}}, 400);
+
+        crow::json::wvalue cmd;
+        cmd["command"] = "TRANSCRIBE_LOCAL";
+        cmd["freq"] = body["freq"].d();
+
+        std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
+        redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
+        return makeCorsResponse({{"status", "transcribing"}});
+    });
+
+    CROW_ROUTE(app, "/api/summarize/local").methods(crow::HTTPMethod::Post)
+    ([](const crow::request& req) {
+        auto body = crow::json::load(req.body);
+        if (!body) return makeCorsResponse({{"status", "error"}}, 400);
+
+        crow::json::wvalue cmd;
+        cmd["command"] = "SUMMARIZE_LOCAL";
+        cmd["freq"] = body["freq"].d();
+        cmd["text"] = body["text"].s(); // Passes the raw text to Ollama
+
+        std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
+        redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
+        return makeCorsResponse({{"status", "summarizing"}});
+    });
+
+    CROW_ROUTE(app, "/api/transcribe/openai").methods(crow::HTTPMethod::Post)
+    ([](const crow::request& req) {
+        auto body = crow::json::load(req.body);
+        if (!body) return makeCorsResponse({{"status", "error"}}, 400);
+
+        crow::json::wvalue cmd;
+        cmd["command"] = "TRANSCRIBE_OPENAI";
+        cmd["freq"] = body["freq"].d();
+
+        std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
+        redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
+        return makeCorsResponse({{"status", "transcribing"}});
+    });
+
+    CROW_ROUTE(app, "/api/summarize/openai").methods(crow::HTTPMethod::Post)
+    ([](const crow::request& req) {
+        auto body = crow::json::load(req.body);
+        if (!body) return makeCorsResponse({{"status", "error"}}, 400);
+
+        crow::json::wvalue cmd;
+        cmd["command"] = "SUMMARIZE_OPENAI";
+        cmd["freq"] = body["freq"].d();
+        cmd["text"] = body["text"].s();
+
+        std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
+        redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
+        return makeCorsResponse({{"status", "summarizing"}});
+    });
+
     CROW_ROUTE(app, "/stations")([]() { return makeCorsResponse(crow::json::wvalue::list()); });
 
     std::cout << "[API] Gateway online at http://0.0.0.0:8080" << std::endl;
