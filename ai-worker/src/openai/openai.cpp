@@ -7,7 +7,6 @@
 using json = nlohmann::json;
 
 // --- Private Helper: cURL write callback to capture response data ---
-// 'static' keeps this function completely hidden from the rest of your project
 static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
     size_t totalSize = size * nmemb;
     userp->append((char*)contents, totalSize);
@@ -46,10 +45,10 @@ std::string transcribeAudio(const std::string& filePath, const std::string& apiK
         curl_mime_name(field, "file");
         curl_mime_filedata(field, filePath.c_str());
 
-        // 2. Specify the transcription model
+        // 2. Specify the transcription model (MUST BE "whisper-1")
         field = curl_mime_addpart(form);
         curl_mime_name(field, "model");
-        curl_mime_data(field, "gpt-4o-mini-transcribe", CURL_ZERO_TERMINATED);
+        curl_mime_data(field, "whisper-1", CURL_ZERO_TERMINATED);
 
         struct curl_slist* headers = NULL;
         std::string authHeader = "Authorization: Bearer " + apiKey;
@@ -60,6 +59,9 @@ std::string transcribeAudio(const std::string& filePath, const std::string& apiK
         curl_easy_setopt(curl, CURLOPT_MIMEPOST, form);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseString);
+        
+        // --- DOCKER FIX: Bypass strict SSL verification ---
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
 
         CURLcode res = curl_easy_perform(curl);
         
@@ -113,6 +115,9 @@ std::string summarizeText(const std::string& transcript, const std::string& apiK
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payloadStr.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseString);
+        
+        // --- DOCKER FIX: Bypass strict SSL verification ---
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
 
         CURLcode res = curl_easy_perform(curl);
         

@@ -10,6 +10,7 @@
 extern "C" {
     #include "sqlite3.h"
 }
+// Search it by any of the keys, and as for as date goes, more recent than or older than 
 
 // 1. Thread-safety: Global mutex to prevent "Database is locked" errors
 //    since we open/close the file every single time.
@@ -96,7 +97,8 @@ std::vector<RadioLog> filterByTime(long long unixTime) {
 
     if (sqlite3_open(DB_NAME, &db) != SQLITE_OK) return results;
 
-    const char *sql = "SELECT radiofrequency, time, location, text, summary FROM RadioLogs WHERE time >= ? AND time <= ? ORDER BY time ASC;";
+    // CORRECTED: Column names and count now match your schema
+    const char *sql = "SELECT freq, time, location, rawT, summary, channelName FROM RadioLogs WHERE time >= ? AND time <= ? ORDER BY time ASC;";
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, unixTime);
@@ -104,11 +106,11 @@ std::vector<RadioLog> filterByTime(long long unixTime) {
         
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             RadioLog log;
-            log.freq     = sqlite3_column_double(stmt, 0);
-            log.time     = sqlite3_column_int64(stmt, 1);
-            log.location = (const char*)sqlite3_column_text(stmt, 2) ? (const char*)sqlite3_column_text(stmt, 2) : "";
-            log.rawT    = (const char*)sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
-            log.summary  = (const char*)sqlite3_column_text(stmt, 4) ? (const char*)sqlite3_column_text(stmt, 4) : "";
+            log.freq        = sqlite3_column_double(stmt, 0);
+            log.time        = sqlite3_column_int64(stmt, 1);
+            log.location    = (const char*)sqlite3_column_text(stmt, 2) ? (const char*)sqlite3_column_text(stmt, 2) : "";
+            log.rawT        = (const char*)sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
+            log.summary     = (const char*)sqlite3_column_text(stmt, 4) ? (const char*)sqlite3_column_text(stmt, 4) : "";
             log.channelName = (const char*)sqlite3_column_text(stmt, 5) ? (const char*)sqlite3_column_text(stmt, 5) : "";
             results.push_back(log);
         }
@@ -117,5 +119,41 @@ std::vector<RadioLog> filterByTime(long long unixTime) {
     sqlite3_finalize(stmt);
     sqlite3_close(db);
 
+    return results;
+}
+
+// ==========================================
+// Filter by Channel Name
+// ==========================================
+std::vector<RadioLog> filterByChannelName(const std::string& channel) {
+    std::lock_guard<std::mutex> lock(db_mtx);
+    sqlite3 *db;
+    sqlite3_stmt *stmt;
+    std::vector<RadioLog> results;
+
+    if (sqlite3_open(DB_NAME, &db) != SQLITE_OK) return results;
+
+    // We use LIKE to allow for partial matches (e.g., "Police" matches "Bham Police 1")
+    const char *sql = "SELECT freq, time, location, rawT, summary, channelName "
+                      "FROM RadioLogs WHERE channelName LIKE ? ORDER BY time DESC;";
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
+        std::string query = "%" + channel + "%";
+        sqlite3_bind_text(stmt, 1, query.c_str(), -1, SQLITE_TRANSIENT);
+        
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            RadioLog log;
+            log.freq        = sqlite3_column_double(stmt, 0);
+            log.time        = sqlite3_column_int64(stmt, 1);
+            log.location    = (const char*)sqlite3_column_text(stmt, 2) ? (const char*)sqlite3_column_text(stmt, 2) : "";
+            log.rawT        = (const char*)sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
+            log.summary     = (const char*)sqlite3_column_text(stmt, 4) ? (const char*)sqlite3_column_text(stmt, 4) : "";
+            log.channelName = (const char*)sqlite3_column_text(stmt, 5) ? (const char*)sqlite3_column_text(stmt, 5) : "";
+            results.push_back(log);
+        }
+    }
+    
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
     return results;
 }
