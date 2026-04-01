@@ -39,25 +39,39 @@ services:
     networks:
       - aetherguard_net
 
+  # =========================================================================
+  # MODIFIED: ag-sdr-live is now a pure DSP container.
+  #
+  # - Removed: privileged, ipc, shm_size, ulimits, /dev/bus/usb mount,
+  #            sdrplay_apiService startup.  None of these are needed because
+  #            USB hardware access moved to the native sdr-relay host app.
+  #
+  # - Added:   SDR_RELAY_HOST / SDR_RELAY_DATA_PORT / SDR_RELAY_CTRL_PORT
+  #            so the container knows where to find the IQ TCP stream.
+  #
+  # - On Windows/macOS: sdr-relay runs natively on the host, so
+  #   SDR_RELAY_HOST=host.docker.internal reaches it through Docker's
+  #   built-in host gateway.
+  #
+  # - On native Linux: sdr-relay can optionally run as a privileged
+  #   container with --device /dev/bus/usb, or natively.  start.sh
+  #   detects the OS and sets SDR_RELAY_HOST accordingly.
+  # =========================================================================
   ag-sdr-live:
     build:
       context: .
       dockerfile: sdr-daemon/Dockerfile
     container_name: ag-sdr-live
-    privileged: true          # Covers SYS_NICE — no cap_add needed
-    ipc: host
-    shm_size: '512m'
-    ulimits:
-      rtprio: 99              # Allows SCHED_FIFO up to priority 99
-      memlock: -1             # Unlimited memory lock, reduces paging jitter
     volumes:
-      - /dev/bus/usb:/dev/bus/usb
       - ./shared-data:/app/shared
+    environment:
+      - SDR_RELAY_HOST=${SDR_RELAY_HOST:-host.docker.internal}
+      - SDR_RELAY_DATA_PORT=${SDR_RELAY_DATA_PORT:-7373}
+      - SDR_RELAY_CTRL_PORT=${SDR_RELAY_CTRL_PORT:-7374}
     depends_on:
       - ag-redis
     networks:
       - aetherguard_net
-    command: /bin/sh -c "/opt/sdrplay_api/sdrplay_apiService & sleep 2 && ./build/sdr_daemon"
 
 networks:
   aetherguard_net:
