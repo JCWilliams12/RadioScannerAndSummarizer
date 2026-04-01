@@ -161,7 +161,7 @@ bool SdrHandler::StartStream(double initialFreq) {
 
     deviceParams->devParams->fsFreq.fsHz = 2000000.0;
     deviceParams->rxChannelA->tunerParams.rfFreq.rfHz = initialFreq;
-    deviceParams->rxChannelA->tunerParams.bwType = sdrplay_api_BW_1_536;
+    deviceParams->rxChannelA->tunerParams.bwType = sdrplay_api_BW_0_600;
     deviceParams->rxChannelA->tunerParams.ifType = sdrplay_api_IF_Zero;
 
     deviceParams->rxChannelA->tunerParams.gain.LNAstate = 4;
@@ -172,7 +172,7 @@ bool SdrHandler::StartStream(double initialFreq) {
     deviceParams->rxChannelA->ctrlParams.dcOffset.IQenable = 1;
 
     deviceParams->rxChannelA->ctrlParams.decimation.enable          = 1;
-    deviceParams->rxChannelA->ctrlParams.decimation.decimationFactor = 8;
+    deviceParams->rxChannelA->ctrlParams.decimation.decimationFactor = 4;
     deviceParams->rxChannelA->ctrlParams.decimation.wideBandSignal   = 0;
 
     std::cout << "\n[SDR] ====== PRE-INIT CONFIG ======" << std::endl;

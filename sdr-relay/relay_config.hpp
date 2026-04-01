@@ -15,7 +15,13 @@ namespace relay {
     // ---- SDR defaults ----
     static constexpr double DEFAULT_FREQ_HZ  = 88000000.0;  // 88.0 MHz
     static constexpr double SAMPLE_RATE_HZ   = 2000000.0;   // 2 MHz master clock
-    static constexpr int    DECIMATION_FACTOR = 8;          // -> 125 kHz delivered
+
+    // Decimation factor 4 → 500 kHz effective IQ rate.
+    // This gives comfortable bandwidth for FM broadcast (±75 kHz deviation
+    // = ~200 kHz occupied, Nyquist at 250 kHz).  The old factor of 16 was
+    // a workaround for the WSL2 USB interrupt bottleneck — no longer needed.
+    static constexpr int    DECIMATION_FACTOR = 4;
+    static constexpr double EFFECTIVE_RATE_HZ = SAMPLE_RATE_HZ / DECIMATION_FACTOR;  // 500 kHz
 
     // ---- Ring buffer for USB→TCP bridging ----
     static constexpr int    POOL_SIZE        = 64;

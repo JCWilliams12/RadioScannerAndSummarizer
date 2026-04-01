@@ -41,8 +41,14 @@ static const uint32_t IQ_HEADER_MAGIC = 0x49515043; // "IQPC"
 // =======================================================
 // SYSTEM STATE & BUFFER POOLS  (UNCHANGED from original)
 // =======================================================
-enum class DeviceMode { IDLE, SCANNING, RECORDING, LIVE_LISTEN };
-std::atomic<DeviceMode> g_mode(DeviceMode::IDLE);
+// =======================================================
+// DEVICE STATE — independent flags replace the old single-state enum.
+// LIVE_LISTEN and RECORDING now coexist. Only SCANNING is exclusive
+// (it sweeps frequencies, so nothing else can use the IQ stream).
+// =======================================================
+std::atomic<bool> g_scanning(false);
+std::atomic<bool> g_recording(false);
+std::atomic<bool> g_live_listen(false);
 
 double g_current_freq = 88.1;
 
@@ -173,7 +179,7 @@ void feedIQToPool(const std::vector<int16_t>& iqBuffer) {
         g_heartbeat_cv.notify_all();
     }
 
-    if (g_mode == DeviceMode::SCANNING || iqBuffer.empty()) return;
+    if (g_scanning.load(std::memory_order_relaxed) || iqBuffer.empty()) return;
 
     static std::vector<int16_t> staging_buf(IQ_CHUNK_SIZE * 2, 0);
     static size_t staging_len  = 0;
@@ -289,57 +295,96 @@ void tcpReaderThread(const char* host, int port) {
 
 
 // =======================================================
-// THREAD 2: DEMOD THREAD  (100% UNCHANGED from original)
+// BIQUAD FILTER (standard second-order IIR section)
 // =======================================================
-inline float fast_atan2(float y, float x) {
-    float abs_y = std::abs(y) + 1e-10f;
-    float angle;
-    if (x >= 0) {
-        float r = (x - abs_y) / (x + abs_y);
-        angle = 0.78539816f - 0.78539816f * r;
-    } else {
-        float r = (x + abs_y) / (abs_y - x);
-        angle = 2.35619449f - 0.78539816f * r;
+struct Biquad {
+    double b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+
+    double process(double in) {
+        double out = b0*in + b1*x1 + b2*x2 - a1*y1 - a2*y2;
+        x2 = x1; x1 = in;
+        y2 = y1; y1 = out;
+        return out;
     }
-    return y < 0 ? -angle : angle;
-}
 
+    void reset() { x1 = x2 = y1 = y2 = 0; }
+
+    // Audio EQ Cookbook: low-pass biquad via bilinear transform
+    static Biquad lowPass(double fc, double fs, double Q) {
+        double w0    = 2.0 * M_PI * fc / fs;
+        double alpha = std::sin(w0) / (2.0 * Q);
+        double cosw0 = std::cos(w0);
+        double a0    = 1.0 + alpha;
+
+        Biquad bq;
+        bq.b0 = ((1.0 - cosw0) / 2.0) / a0;
+        bq.b1 =  (1.0 - cosw0)        / a0;
+        bq.b2 = ((1.0 - cosw0) / 2.0) / a0;
+        bq.a1 = (-2.0 * cosw0)        / a0;
+        bq.a2 =  (1.0 - alpha)        / a0;
+        return bq;
+    }
+};
+
+
+// =======================================================
+// THREAD 2: DEMOD THREAD — Clean FM Broadcast DSP
+// =======================================================
+// With the USB bottleneck eliminated, this is now a textbook
+// FM mono demodulator.  No sinc compensators, no notch filters,
+// no single-pole hacks.
+//
+// Pipeline (500 kHz IQ rate from relay with decimation=4):
+//   1. Channel filter: 4th-order Butterworth LPF @ 100 kHz
+//      Rejects adjacent FM stations (200 kHz spacing)
+//   2. FM discriminator: atan2 + phase unwrap
+//   3. Audio LPF: 4th-order Butterworth @ 15 kHz
+//      Removes 19 kHz pilot, subcarrier, and noise
+//   4. De-emphasis: 75 µs (US/Americas standard)
+//   5. Fractional resampler: 500 kHz → 16 kHz (linear interp)
+//   6. Output: 16 kHz mono PCM for Whisper transcription
+// =======================================================
 void demodThread() {
-    std::cout << "[DEMOD] *** BUILD v12-TCP: SINC_COMPENSATOR EQ@1800Hz +15dB, de=0.1, notch Q=15 ***" << std::endl;
+    std::cout << "[DEMOD] *** BUILD v13-CLEAN: Butterworth ch@100k + audio@15k, "
+              << "75µs de-emph, 500k→16k linear resamp ***" << std::endl;
 
-    float i_state = 0.0f;
-    float q_state = 0.0f;
-    const float iq_alpha = 0.8f;
+    // === IQ Sample Rate (must match relay decimation config) ===
+    const double IQ_RATE    = 500000.0;   // 2 MHz / 4
+    const double AUDIO_RATE = 16000.0;
+    const float  RESAMP_RATIO = static_cast<float>(AUDIO_RATE / IQ_RATE);  // 0.032
 
+    // === Channel Filter: 4th-order Butterworth LPF, fc=100 kHz ===
+    // Two cascaded biquads per channel (I and Q independently).
+    // Butterworth Q values for 4th order: 0.5412 and 1.3066
+    Biquad ch_i1 = Biquad::lowPass(100000.0, IQ_RATE, 0.5412);
+    Biquad ch_i2 = Biquad::lowPass(100000.0, IQ_RATE, 1.3066);
+    Biquad ch_q1 = Biquad::lowPass(100000.0, IQ_RATE, 0.5412);
+    Biquad ch_q2 = Biquad::lowPass(100000.0, IQ_RATE, 1.3066);
+
+    // === FM Discriminator State ===
     float prev_phase = 0.0f;
 
-    float aa_state1 = 0.0f;
-    float aa_state2 = 0.0f;
-    float aa_state3 = 0.0f;
-    const float aa_alpha = 0.08f;
+    // === Audio LPF: 4th-order Butterworth, fc=15 kHz ===
+    // Runs at the full 500 kHz IQ rate (before decimation) for
+    // maximum anti-alias rejection before the resampler.
+    Biquad aud1 = Biquad::lowPass(15000.0, IQ_RATE, 0.5412);
+    Biquad aud2 = Biquad::lowPass(15000.0, IQ_RATE, 1.3066);
 
-    // Notch filter at 2375 Hz: Q=15 (sharp, ~160Hz width)
-    const double w0_notch = 2.0 * M_PI * 2375.0 / 16000.0;
-    const double alpha_notch = std::sin(w0_notch) / (2.0 * 15.0);
-    const double NB0 = 1.0 / (1.0 + alpha_notch);
-    const double NB1 = (-2.0 * std::cos(w0_notch)) / (1.0 + alpha_notch);
-    const double NB2 = 1.0 / (1.0 + alpha_notch);
-    const double NA1 = NB1;
-    const double NA2 = (1.0 - alpha_notch) / (1.0 + alpha_notch);
-    double nx1 = 0.0, nx2 = 0.0, ny1 = 0.0, ny2 = 0.0;
+    // === De-emphasis: 75 µs time constant (US standard) ===
+    // First-order IIR: y[n] = (1-d)*x[n] + d*y[n-1]
+    const double de_d = std::exp(-1.0 / (75.0e-6 * IQ_RATE));   // ≈ 0.9737
+    double de_state = 0.0;
 
-    // Peaking EQ: +15 dB at 1800 Hz, Q=1.5, Fs=16000
-    const double PB0 = 1.3880, PB1 = -1.3996, PB2 = 0.4442;
-    const double PA1 = -1.3996, PA2 = 0.8322;
-    double px1 = 0.0, px2 = 0.0, py1 = 0.0, py2 = 0.0;
+    // === FM Gain ===
+    // Max phase_diff for ±75 kHz deviation at 500 kHz = ±0.94 rad.
+    // After LPF + de-emphasis, speech sits well below that.
+    // Gain of 2.0 produces healthy PCM levels without clipping.
+    const float FM_GAIN = 2.0f;
 
-    float de_state = 0.0f;
-    const float de_alpha = 0.56f;
-    const float FM_GAIN = 4.25f;
-
-    const float resamp_ratio = 16000.0f / 125000.0f;
-    float g_resamp_phase = 0.0f;
-    float g_prev_audio = 0.0f;
+    // === Fractional Resampler with Linear Interpolation ===
+    float resamp_phase = 0.0f;
+    float prev_audio   = 0.0f;   // previous audio sample for interpolation
 
     int pcm_idx = 0;
     size_t out_len = 0;
@@ -347,14 +392,18 @@ void demodThread() {
 
     auto diag_wall_start = std::chrono::steady_clock::now();
 
+    // === Diagnostic: track effective IQ rate ===
+    const int DIAG_IQ_PERIOD = 500000;  // Report every 500k samples (1 sec at 500 kHz)
+
     while (true) {
+        // ---- Gap recovery: reset all filter state ----
         if (g_stream_gap.exchange(false, std::memory_order_acq_rel)) {
-            i_state = 0.0f; q_state = 0.0f;
+            ch_i1.reset(); ch_i2.reset();
+            ch_q1.reset(); ch_q2.reset();
+            aud1.reset();  aud2.reset();
+            de_state = 0.0;
             prev_phase = 0.0f;
-            aa_state1 = 0.0f; aa_state2 = 0.0f; aa_state3 = 0.0f;
-            de_state = 0.0f; g_prev_audio = 0.0f;
-            nx1 = 0.0; nx2 = 0.0; ny1 = 0.0; ny2 = 0.0;
-            px1 = 0.0; px2 = 0.0; py1 = 0.0; py2 = 0.0;
+            prev_audio = 0.0f;
         }
 
         int idx = iq_read_idx.load(std::memory_order_relaxed) % POOL_SIZE;
@@ -373,6 +422,7 @@ void demodThread() {
 
         auto start_time = std::chrono::high_resolution_clock::now();
 
+        // Acquire a PCM output slot if we don't have one
         if (!pcm_acquired) {
             pcm_idx = pcm_write_idx.load(std::memory_order_relaxed) % POOL_SIZE;
             if (!pcm_pool[pcm_idx].in_use.load(std::memory_order_acquire)) {
@@ -382,43 +432,45 @@ void demodThread() {
             }
         }
 
+        // ---- Process every IQ sample in this chunk ----
         for (size_t i = 0; i < iq_pool[idx].len; i++) {
-            float bb_i = static_cast<float>(iq_pool[idx].data[2 * i]);
-            float bb_q = static_cast<float>(iq_pool[idx].data[2 * i + 1]);
+            float raw_i = static_cast<float>(iq_pool[idx].data[2 * i]);
+            float raw_q = static_cast<float>(iq_pool[idx].data[2 * i + 1]);
 
-            i_state = (iq_alpha * bb_i) + ((1.0f - iq_alpha) * i_state);
-            q_state = (iq_alpha * bb_q) + ((1.0f - iq_alpha) * q_state);
+            // 1. Channel filter (4th-order Butterworth, fc=100 kHz)
+            double fi = ch_i2.process(ch_i1.process(static_cast<double>(raw_i)));
+            double fq = ch_q2.process(ch_q1.process(static_cast<double>(raw_q)));
 
-            float current_phase = std::atan2(q_state, i_state);
+            // 2. FM discriminator: atan2 phase + unwrapped diff
+            float current_phase = std::atan2(static_cast<float>(fq), static_cast<float>(fi));
             float phase_diff = current_phase - prev_phase;
             if (phase_diff >  M_PI) phase_diff -= 2.0f * M_PI;
             if (phase_diff < -M_PI) phase_diff += 2.0f * M_PI;
             prev_phase = current_phase;
 
-            aa_state1 = (aa_alpha * phase_diff) + ((1.0f - aa_alpha) * aa_state1);
-            aa_state2 = (aa_alpha * aa_state1)  + ((1.0f - aa_alpha) * aa_state2);
-            aa_state3 = (aa_alpha * aa_state2)  + ((1.0f - aa_alpha) * aa_state3);
+            // 3. Audio LPF (4th-order Butterworth, fc=15 kHz)
+            double audio = aud2.process(aud1.process(static_cast<double>(phase_diff)));
 
-            g_resamp_phase += resamp_ratio;
-            if (g_resamp_phase >= 1.0f) {
-                g_resamp_phase -= 1.0f;
+            // 4. De-emphasis: 75 µs (US standard)
+            de_state = (1.0 - de_d) * audio + de_d * de_state;
 
-                float raw_audio = aa_state3 * FM_GAIN;
-                de_state = (de_alpha * raw_audio) + ((1.0f - de_alpha) * de_state);
+            float current_audio = static_cast<float>(de_state) * FM_GAIN;
 
-                double notch_in = static_cast<double>(de_state);
-                double notch_out = NB0 * notch_in + NB1 * nx1 + NB2 * nx2 - NA1 * ny1 - NA2 * ny2;
-                nx2 = nx1; nx1 = notch_in; ny2 = ny1; ny1 = notch_out;
+            // 5. Fractional resampler: 500 kHz → 16 kHz with linear interpolation
+            resamp_phase += RESAMP_RATIO;
+            if (resamp_phase >= 1.0f) {
+                resamp_phase -= 1.0f;
 
-                double eq_out = PB0 * notch_out + PB1 * px1 + PB2 * px2 - PA1 * py1 - PA2 * py2;
-                px2 = px1; px1 = notch_out; py2 = py1; py1 = eq_out;
+                // Linear interpolation between previous and current sample
+                float t = resamp_phase / RESAMP_RATIO;
+                float sample = prev_audio * (1.0f - t) + current_audio * t;
 
-                float pristine = static_cast<float>(eq_out);
-                if (pristine >  1.0f) pristine =  1.0f;
-                if (pristine < -1.0f) pristine = -1.0f;
+                // Hard clamp to [-1, 1]
+                if (sample >  1.0f) sample =  1.0f;
+                if (sample < -1.0f) sample = -1.0f;
 
                 if (pcm_acquired) {
-                    pcm_pool[pcm_idx].data[out_len++] = static_cast<int16_t>(pristine * 32767.0f);
+                    pcm_pool[pcm_idx].data[out_len++] = static_cast<int16_t>(sample * 32767.0f);
                     if (out_len >= PCM_CHUNK_SIZE - 10) {
                         diag_pcm_gen.fetch_add(out_len, std::memory_order_relaxed);
                         pcm_pool[pcm_idx].len = out_len;
@@ -445,8 +497,10 @@ void demodThread() {
                     }
                 }
             }
+            prev_audio = current_audio;
         }
 
+        // Release the IQ slot
         iq_pool[idx].ready.store(false, std::memory_order_release);
         iq_pool[idx].in_use.store(false, std::memory_order_release);
         iq_read_idx.fetch_add(1, std::memory_order_relaxed);
@@ -454,9 +508,10 @@ void demodThread() {
         auto end_time = std::chrono::high_resolution_clock::now();
         diag_demod_time_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count(), std::memory_order_relaxed);
 
+        // ---- Diagnostics: report every 500k IQ samples (≈1 second) ----
         int current_iq_rx = diag_iq_rx.load();
-        if (current_iq_rx >= 250000) {
-            diag_iq_rx.fetch_sub(250000, std::memory_order_relaxed);
+        if (current_iq_rx >= DIAG_IQ_PERIOD) {
+            diag_iq_rx.fetch_sub(DIAG_IQ_PERIOD, std::memory_order_relaxed);
 
             int d_iq   = diag_iq_drop.exchange(0);
             int d_pgen = diag_pcm_gen.exchange(0);
@@ -468,12 +523,12 @@ void demodThread() {
             auto diag_wall_now = std::chrono::steady_clock::now();
             float wall_sec = std::chrono::duration<float>(diag_wall_now - diag_wall_start).count();
             diag_wall_start = diag_wall_now;
-            float effective_iq_rate = 250000.0f / wall_sec;
+            float effective_iq_rate = static_cast<float>(DIAG_IQ_PERIOD) / wall_sec;
 
             std::cout << "\n=============================================" << std::endl;
-            std::cout << "[DIAGNOSTICS] --- 1 SECOND LEAK REPORT ---" << std::endl;
+            std::cout << "[DIAGNOSTICS] --- 1 SECOND REPORT ---" << std::endl;
             std::cout << "  -> Wall Clock    : " << wall_sec << " sec (Expected: ~1.0s)" << std::endl;
-            std::cout << "  -> Effective Rate: " << effective_iq_rate << " IQ/sec (Expected: 250000)" << std::endl;
+            std::cout << "  -> Effective Rate: " << effective_iq_rate << " IQ/sec (Expected: 500000)" << std::endl;
             std::cout << "  -> Math CPU Load : " << cpu_percent << "%" << std::endl;
             std::cout << "  -> IQ Dropped    : " << d_iq << " samples (If > 0: CPU is too slow)" << std::endl;
             std::cout << "  -> Audio Gen     : " << d_pgen << " samples" << std::endl;
@@ -507,7 +562,7 @@ void outputThread() {
             }
         }
 
-        if (g_mode == DeviceMode::LIVE_LISTEN && local_redis && !local_redis->err) {
+        if (g_live_listen.load(std::memory_order_relaxed) && local_redis && !local_redis->err) {
             std::string payload(reinterpret_cast<const char*>(pcm_pool[idx].data.data()),
                                 pcm_pool[idx].len * sizeof(int16_t));
             redisReply* r = (redisReply*)redisCommand(local_redis, "PUBLISH live_audio %b",
@@ -575,7 +630,7 @@ void ctrlReaderThread(const char* host, int port) {
                 // ---- scan_complete: relay finished scanning, forward to Redis ----
                 if (event == "scan_complete") {
                     std::cout << "[TCP-CTRL] Received scan_complete from relay." << std::endl;
-                    g_mode = DeviceMode::IDLE;
+                    g_scanning.store(false, std::memory_order_release);
 
                     std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
                     redisReply* r = (redisReply*)redisCommand(
@@ -647,31 +702,42 @@ void commandListener() {
 
             g_current_freq = targetFreq;
 
-            // ---- TUNE: forward to relay ----
-            if (cmd == "TUNE" && g_mode != DeviceMode::SCANNING) {
+            // ---- TUNE: forward to relay (blocked only during scan) ----
+            if (cmd == "TUNE" && !g_scanning.load(std::memory_order_relaxed)) {
                 crow::json::wvalue relay_cmd;
                 relay_cmd["command"] = "TUNE";
                 relay_cmd["freq"]    = targetFreq;
                 sendCtrlCommand(relay_cmd.dump());
             }
-            // ---- RECORD: configure relay hardware, manage local WAV recording ----
-            else if (cmd == "RECORD" && g_mode == DeviceMode::IDLE) {
-                g_mode = DeviceMode::RECORDING;
+            // ---- RECORD: allowed unless scanning (can coexist with LIVE_LISTEN) ----
+            else if (cmd == "RECORD" && !g_scanning.load(std::memory_order_relaxed)
+                                     && !g_recording.load(std::memory_order_relaxed)) {
+                g_recording.store(true, std::memory_order_release);
 
                 std::thread([targetFreq]() {
-                    // Tell relay to configure hardware for recording
-                    crow::json::wvalue hw_cmd;
-                    hw_cmd["command"] = "CONFIGURE";
-                    hw_cmd["freq"]    = targetFreq;
-                    hw_cmd["bw"]      = "BW_0_200";
-                    hw_cmd["if_mode"] = "IF_Zero";
-                    hw_cmd["agc"]     = "off";
-                    hw_cmd["lna"]     = 4;
-                    sendCtrlCommand(hw_cmd.dump());
+                    // Only reconfigure hardware if live_listen isn't already
+                    // streaming on the same frequency — avoids a brief glitch.
+                    // If live_listen IS active, the hardware is already set up.
+                    if (!g_live_listen.load(std::memory_order_relaxed)) {
+                        crow::json::wvalue hw_cmd;
+                        hw_cmd["command"] = "CONFIGURE";
+                        hw_cmd["freq"]    = targetFreq;
+                        hw_cmd["bw"]      = "BW_0_300";
+                        hw_cmd["if_mode"] = "IF_Zero";
+                        hw_cmd["agc"]     = "off";
+                        hw_cmd["lna"]     = 4;
+                        sendCtrlCommand(hw_cmd.dump());
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    } else {
+                        // Already live — just make sure we're on the right freq
+                        crow::json::wvalue tune_cmd;
+                        tune_cmd["command"] = "TUNE";
+                        tune_cmd["freq"]    = targetFreq;
+                        sendCtrlCommand(tune_cmd.dump());
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
 
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-                    // Local WAV file management (unchanged)
+                    // Local WAV file management
                     std::string filename = "/app/shared/audio/audio.wav";
                     SF_INFO sfinfo;
                     std::memset(&sfinfo, 0, sizeof(sfinfo));
@@ -690,7 +756,7 @@ void commandListener() {
                     std::this_thread::sleep_for(std::chrono::seconds(30));
 
                     g_wav_write_active = false;
-                    g_mode             = DeviceMode::IDLE;
+                    g_recording.store(false, std::memory_order_release);
 
                     {
                         std::lock_guard<std::mutex> lock(g_wav_mtx);
@@ -710,37 +776,54 @@ void commandListener() {
                     if (r) freeReplyObject(r);
                 }).detach();
             }
-            // ---- LIVE_LISTEN: configure relay, set local mode ----
-            else if (cmd == "LIVE_LISTEN" && g_mode == DeviceMode::IDLE) {
+            // ---- LIVE_LISTEN: allowed unless scanning (can coexist with RECORD) ----
+            else if (cmd == "LIVE_LISTEN" && !g_scanning.load(std::memory_order_relaxed)) {
                 if (!freqProvided) {
                     std::cerr << "[LIVE_LISTEN] REJECTED — no freq in command." << std::endl;
+                } else if (g_live_listen.load(std::memory_order_relaxed)) {
+                    // Already live — just retune if frequency changed
+                    crow::json::wvalue tune_cmd;
+                    tune_cmd["command"] = "TUNE";
+                    tune_cmd["freq"]    = targetFreq;
+                    sendCtrlCommand(tune_cmd.dump());
+                    std::cout << "[Live] Retuned to " << targetFreq << " MHz." << std::endl;
                 } else {
-                    g_mode = DeviceMode::LIVE_LISTEN;
+                    g_live_listen.store(true, std::memory_order_release);
 
                     std::thread([targetFreq]() {
-                        crow::json::wvalue hw_cmd;
-                        hw_cmd["command"] = "CONFIGURE";
-                        hw_cmd["freq"]    = targetFreq;
-                        hw_cmd["bw"]      = "BW_0_200";
-                        hw_cmd["if_mode"] = "IF_Zero";
-                        hw_cmd["agc"]     = "off";
-                        hw_cmd["lna"]     = 4;
-                        sendCtrlCommand(hw_cmd.dump());
-
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        // Only reconfigure hardware if not already recording
+                        if (!g_recording.load(std::memory_order_relaxed)) {
+                            crow::json::wvalue hw_cmd;
+                            hw_cmd["command"] = "CONFIGURE";
+                            hw_cmd["freq"]    = targetFreq;
+                            hw_cmd["bw"]      = "BW_0_300";
+                            hw_cmd["if_mode"] = "IF_Zero";
+                            hw_cmd["agc"]     = "off";
+                            hw_cmd["lna"]     = 4;
+                            sendCtrlCommand(hw_cmd.dump());
+                            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        } else {
+                            crow::json::wvalue tune_cmd;
+                            tune_cmd["command"] = "TUNE";
+                            tune_cmd["freq"]    = targetFreq;
+                            sendCtrlCommand(tune_cmd.dump());
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
                         std::cout << "[Live] Streaming " << targetFreq
                                   << " MHz to WebSockets..." << std::endl;
                     }).detach();
                 }
             }
-            // ---- STOP_LIVE: local mode change only ----
-            else if (cmd == "STOP_LIVE" && g_mode == DeviceMode::LIVE_LISTEN) {
-                g_mode = DeviceMode::IDLE;
+            // ---- STOP_LIVE: clear live flag only (recording continues unaffected) ----
+            else if (cmd == "STOP_LIVE" && g_live_listen.load(std::memory_order_relaxed)) {
+                g_live_listen.store(false, std::memory_order_release);
                 std::cout << "[Live] Stopped." << std::endl;
             }
-            // ---- SCAN: delegate entirely to relay ----
-            else if (cmd == "SCAN" && g_mode == DeviceMode::IDLE) {
-                g_mode = DeviceMode::SCANNING;
+            // ---- SCAN: exclusive — only when nothing else is active ----
+            else if (cmd == "SCAN" && !g_scanning.load(std::memory_order_relaxed)
+                                   && !g_recording.load(std::memory_order_relaxed)
+                                   && !g_live_listen.load(std::memory_order_relaxed)) {
+                g_scanning.store(true, std::memory_order_release);
                 crow::json::wvalue relay_cmd;
                 relay_cmd["command"] = "SCAN";
                 sendCtrlCommand(relay_cmd.dump());

@@ -389,7 +389,7 @@ std::string handleCommand(SdrHandler* sdr, const json& cmd) {
         sdrplay_api_GetDeviceParams(sdr->getDeviceHandle()->dev, &params);
         if (params && params->rxChannelA) {
             params->rxChannelA->ctrlParams.agc.enable     = sdrplay_api_AGC_DISABLE;
-            params->rxChannelA->tunerParams.gain.LNAstate = 6;
+            params->rxChannelA->tunerParams.gain.LNAstate = 2;
             sdrplay_api_Update(sdr->getDeviceHandle()->dev, sdr->getDeviceHandle()->tuner,
                 (sdrplay_api_ReasonForUpdateT)(sdrplay_api_Update_Ctrl_Agc | sdrplay_api_Update_Tuner_Gr),
                 sdrplay_api_Update_Ext1_None);
