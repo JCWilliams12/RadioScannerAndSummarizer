@@ -1,21 +1,22 @@
-version: '3.8'
-
 services:
   ag-redis:
     image: redis:alpine
     container_name: ag-redis
-    platform: linux/amd64
     ports:
       - "6379:6379"
     networks:
       - aetherguard_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
 
   ag-api:
     build:
       context: .
       dockerfile: api-core/Dockerfile
     container_name: ag-api
-    platform: linux/amd64
     ports:
       - "8080:8080"
     volumes:
@@ -23,7 +24,8 @@ services:
     env_file:
       - .env
     depends_on:
-      - ag-redis
+      ag-redis:                           # <--- Hyphen removed!
+        condition: service_healthy
     networks:
       - aetherguard_net
 
@@ -32,34 +34,16 @@ services:
       context: .
       dockerfile: ai-worker/Dockerfile
     container_name: ag-ai
-    platform: linux/amd64
     volumes:
       - ./shared-data:/app/shared
     env_file:
       - .env
     depends_on:
-      - ag-redis
+      ag-redis:                           # <--- Updated!
+        condition: service_healthy
     networks:
       - aetherguard_net
 
-  # =========================================================================
-  # MODIFIED: ag-sdr-live is now a pure DSP container.
-  #
-  # - Removed: privileged, ipc, shm_size, ulimits, /dev/bus/usb mount,
-  #            sdrplay_apiService startup.  None of these are needed because
-  #            USB hardware access moved to the native sdr-relay host app.
-  #
-  # - Added:   SDR_RELAY_HOST / SDR_RELAY_DATA_PORT / SDR_RELAY_CTRL_PORT
-  #            so the container knows where to find the IQ TCP stream.
-  #
-  # - On Windows/macOS: sdr-relay runs natively on the host, so
-  #   SDR_RELAY_HOST=host.docker.internal reaches it through Docker's
-  #   built-in host gateway.
-  #
-  # - On native Linux: sdr-relay can optionally run as a privileged
-  #   container with --device /dev/bus/usb, or natively.  start.sh
-  #   detects the OS and sets SDR_RELAY_HOST accordingly.
-  # =========================================================================
   ag-sdr-live:
     build:
       context: .
@@ -71,8 +55,11 @@ services:
       - SDR_RELAY_HOST=${SDR_RELAY_HOST:-host.docker.internal}
       - SDR_RELAY_DATA_PORT=${SDR_RELAY_DATA_PORT:-7373}
       - SDR_RELAY_CTRL_PORT=${SDR_RELAY_CTRL_PORT:-7374}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  
     depends_on:
-      - ag-redis
+      ag-redis:                           # <--- Updated!
+        condition: service_healthy
     networks:
       - aetherguard_net
 
