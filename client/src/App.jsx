@@ -135,7 +135,7 @@ const HeaderLogo = ({ isHovered, onHoverStart, onHoverEnd }) => {
             key={i}
             custom={i}
             initial="initial"
-            animate={isHovered ? "active" : "initial"}
+            animate={"active"}
             variants={arcVariants}
             /* Quarter-circle arc: starts at (r, 0) and sweeps to (0, r) */
             d={`M ${arc.r} 0 A ${arc.r} ${arc.r} 0 0 1 0 ${arc.r}`}
