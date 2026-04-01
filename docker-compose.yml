@@ -66,13 +66,3 @@ services:
 networks:
   aetherguard_net:
     driver: bridge
-
-ollama: 
-  image: ollama/ollama:latest
-    container_name: ag-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      # THE MAGIC BRIDGE: Maps your Mac's downloaded models directly into the container
-      - ~/.ollama/models:/root/.ollama/models
-    restart: unless-stopped
