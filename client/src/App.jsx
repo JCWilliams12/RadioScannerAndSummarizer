@@ -46,7 +46,7 @@ const ScanProgress = ({ status, progress }) => {
         width: '100%',
         maxWidth: '320px',
         height: '8px',
-        backgroundColor: 'rgba(0, 43, 94, 0.2)',
+        backgroundColor: 'rgba(3, 3, 3, 0.2)',
         borderRadius: '4px',
         overflow: 'hidden',
         position: 'relative',
@@ -193,6 +193,7 @@ function App() {
   const [scanStatus, setScanStatus] = useState("");
   const [scanProgress, setScanProgress] = useState(0);
 
+
   // For Playback function on DB page
   const [showPlaybackMenu, setShowPlaybackMenu] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -261,10 +262,13 @@ function App() {
     }
   };
 
+
+
   useEffect(() => {
     fetchStations();
     fetchLogs(); 
   }, []);
+
 
   // Close Playback menu when clicking outside of it
   useEffect(() => {
@@ -285,6 +289,7 @@ function App() {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [showPlaybackMenu]);
+
   
   // WIDEBAND FM SPECTRUM SWEEP
   const handleWidebandSweep = async () => {
@@ -312,10 +317,7 @@ function App() {
   // LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
   useEffect(() => {
     if (isListeningLive && selectedStation) {
-      // FIX: Force the AudioContext to match the backend 48kHz output
-      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 16000
-      });
+      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
 
       // Reset the scheduler so the first chunk plays immediately
       nextPlayTimeRef.current = 0;
@@ -327,7 +329,6 @@ function App() {
         if (!audioCtxRef.current) return;
         
         const pcm16 = new Int16Array(event.data);
-        // FIX: Buffer set to exactly 16000 Hz to prevent playback distortion
         const audioBuffer = audioCtxRef.current.createBuffer(1, pcm16.length, 16000);
         const channelData = audioBuffer.getChannelData(0);
         for (let i = 0; i < pcm16.length; i++) {
@@ -338,7 +339,7 @@ function App() {
         source.buffer = audioBuffer;
         source.connect(audioCtxRef.current.destination);
 
-        // --- Schedule chunks back-to-back using a running clock ---
+        // --- FIX: Schedule chunks back-to-back using a running clock ---
         const currentTime = audioCtxRef.current.currentTime;
         if (nextPlayTimeRef.current < currentTime) {
           // Fell behind (underrun) - re-sync with a small 50ms buffer
@@ -348,15 +349,13 @@ function App() {
         nextPlayTimeRef.current += audioBuffer.duration;
       };
 
-      // FIX: Trigger the LIVE_LISTEN command on the backend explicitly
-      fetch('/api/scan/live', {
+      fetch('/api/scan/tune', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', freq: parseFloat(selectedStation.freq) })
-      }).catch(err => console.error("Hardware live start error:", err));
+        body: JSON.stringify({ freq: parseFloat(selectedStation.freq) })
+      }).catch(err => console.error("Hardware tuning error:", err));
       
     } else {
-      // Clean up connections
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -365,26 +364,11 @@ function App() {
         audioCtxRef.current.close();
         audioCtxRef.current = null;
       }
-      
-      // FIX: Ensure backend terminates the live listen stream when off
-      fetch('/api/scan/live', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop' })
-      }).catch(err => console.error("Hardware live stop error:", err));
     }
 
     return () => {
-      // Ensure strict cleanup on component unmount
       if (wsRef.current) wsRef.current.close();
       if (audioCtxRef.current) audioCtxRef.current.close();
-      if (isListeningLive) {
-        fetch('/api/scan/live', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'stop' })
-        }).catch(err => console.error("Hardware live stop error:", err));
-      }
     };
   }, [isListeningLive, selectedStation]);
 
@@ -407,7 +391,8 @@ function App() {
     };
   }, [showPlaybackMenu, selectedLog]);
 
-  // --- NEW: Status WebSocket Listener ---
+  // THE 3-STEP SCAN HANDLER (Record -> Transcribe -> Summarize)
+// --- NEW: Status WebSocket Listener ---
   useEffect(() => {
     const statusWs = new WebSocket(`ws://${window.location.host}/ws/status`);
     
@@ -455,6 +440,10 @@ function App() {
     if (!selectedStation) return;
     const targetFreq = selectedStation.freq;
 
+    setIsScanning(true);
+    setScanProgress(5);
+    setScanStatus(`Connecting to ${Number(targetFreq).toFixed(3)} MHz...`);
+
     updateJob(targetFreq, { 
       status: "recording",
       summary: "Hardware: Recording 30-second capture...",
@@ -462,15 +451,110 @@ function App() {
     });
 
     try {
-      await fetch('/api/scan/record', {
+      setScanProgress(10);
+      setScanStatus("Hardware: Starting 30-second recording...");
+      
+      const recordRes = await fetch('/api/scan/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ freq: parseFloat(targetFreq) })
       });
-      // The rest is handled automatically by the WebSocket listener above!
+
+      let recordData = null;
+      try {
+        recordData = await recordRes.json();
+      } catch {
+        throw new Error(`Record endpoint returned non-JSON (status: ${recordRes.status}). Check server console.`);
+      }
+
+      if (!recordRes.ok || recordData?.status !== "recording_started") {
+        throw new Error(`Recording failed. Status: ${recordRes.status}, Body: ${JSON.stringify(recordData)}`);
+      }
+
+      updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
+
+      //Animate progress
+      const recordingStart = Date.now();
+      const recordingDuration = 31000
+      const progressInterval = setInterval(() => {
+        const elapsed = Date.now() - recordingStart;
+      const ratio = Math.min(elapsed / recordingDuration, 1);
+      const currentProgress = Math.round(10 + ratio * 35);
+      setScanProgress(currentProgress);
+
+      const secondsLeft = Math.max(0, Math.ceil((recordingDuration - elapsed) / 1000));
+      setScanStatus(`Hardware: Recording in progress... (${secondsLeft}s remaining)`);
+
+      if (ratio >= 1) clearInterval(progressInterval);}, 500);
+
+      await new Promise(resolve => setTimeout(resolve, recordingDuration));
+      clearInterval(progressInterval);
+
+      //Transcribe
+
+      setScanProgress(50);
+      setScanStatus("Transcribing audio")
+      updateJob(targetFreq, { summary: "AI: Processing transcription...",});
+
+
+      const transcribeRes = await fetch(transcribeRoute, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ freq: parseFloat(targetFreq) }),
+      });
+
+      if (!transcribeRes.ok) throw new Error(`Transcription failed (${transcribeRes.status})`);
+      const transcribeData = await transcribeRes.json();
+      
+      const rawText = transcribeData.transcription;
+      updateJob(targetFreq, { 
+        rawText: rawText,
+        summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
+      });
+
+      //summarize
+      setScanProgress(75);
+      setScanStatus("Generating summary...");
+
+      const summaryRes = await fetch(summarizeRoute, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: rawText }),
+      });
+
+      if (!summaryRes.ok) throw new Error(`Summarization failed (${summaryRes.status})`);
+      const summaryData = await summaryRes.json();
+
+            // Finalize
+      setScanProgress(95);
+      setScanStatus("Finalizing scan...");
+      
+      updateJob(targetFreq, { 
+        status: "complete",
+        summary: summaryData.summary 
+      });
+
+      await new Promise(r => setTimeout(r, 400));
+      
+      setScanProgress(100);
+      setScanStatus("Scan complete");
+
+      await new Promise(r => setTimeout(r, 800));
+      setIsScanning(false);
+
     } catch (error) {
       console.error(`Scan error on ${targetFreq}:`, error);
-      updateJob(targetFreq, { status: "error", summary: `Error: ${error.message}` });
+      updateJob(targetFreq, { 
+        status: "error",
+        summary: `Error: ${error.message}`,
+        rawText: "Scan failed. Check server console."
+      });
+      setScanStatus(`Error: ${error.message}`);
+      setScanProgress(0);
+ 
+      // Keep the error visible briefly before clearing
+      await new Promise(r => setTimeout(r, 2000));
+      setIsScanning(false);
     }
   };
 
@@ -796,6 +880,7 @@ function App() {
                 {isScanningBand ? "Sweeping Spectrum (88-108 MHz)..." : "Auto-Find Stations"}
               </button>
 
+              {/* Zeroed out default browser list spacing and made it scrollable */}
               <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none' }}>
                 {stations.map(s => (
                   <li 

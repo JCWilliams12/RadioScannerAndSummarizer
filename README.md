@@ -37,3 +37,16 @@ docker-compose up --build
 cd sdr-relay
 cmake --build build
 .\build\Debug\sdr_relay.exe
+
+
+---- For mac first time: 
+cmake -B build
+cmake --build build
+./build/sdr_relay
+
+--- Then run: 
+docker build -t aetherguard-base:latest -f Dockerfile.base .
+docker-compose up --build
+
+
+
