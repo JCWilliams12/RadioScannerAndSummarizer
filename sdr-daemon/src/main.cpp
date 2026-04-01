@@ -24,27 +24,15 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <cerrno>
+#include <sys/stat.h>
 
 // =======================================================
 // IQ-OVER-TCP WIRE PROTOCOL
 // =======================================================
-// The sdr-relay streams on the DATA port (default 7373):
-//   [uint32_t num_samples (network order)] [int16_t I, Q, I, Q, ...]
-//
-// The CONTROL port (default 7374) carries newline-delimited JSON:
-//   sdr-daemon  → relay:  {"command":"TUNE","freq":88.1}
-//   relay → sdr-daemon:   {"event":"scan_complete","stations":[...]}
-// =======================================================
-
 static const uint32_t IQ_HEADER_MAGIC = 0x49515043; // "IQPC"
 
 // =======================================================
-// SYSTEM STATE & BUFFER POOLS  (UNCHANGED from original)
-// =======================================================
-// =======================================================
-// DEVICE STATE — independent flags replace the old single-state enum.
-// LIVE_LISTEN and RECORDING now coexist. Only SCANNING is exclusive
-// (it sweeps frequencies, so nothing else can use the IQ stream).
+// DEVICE STATE — independent flags (LIVE_LISTEN + RECORDING coexist)
 // =======================================================
 std::atomic<bool> g_scanning(false);
 std::atomic<bool> g_recording(false);
@@ -90,7 +78,7 @@ std::condition_variable g_heartbeat_cv;
 std::atomic<long>       g_heartbeat_count(0);
 
 // =======================================================
-// ORIGINAL TELEMETRY TRACKERS  (UNCHANGED)
+// TELEMETRY TRACKERS
 // =======================================================
 std::atomic<int>  g_diag_usb_samples(0);
 std::atomic<int>  g_diag_pcm_samples(0);
@@ -98,9 +86,6 @@ std::atomic<int>  g_diag_drop_count(0);
 std::atomic<int>  g_diag_phase_bangs(0);
 std::atomic<bool> g_stream_gap(false);
 
-// =======================================================
-// LEAK DIAGNOSTIC TRACKERS  (UNCHANGED)
-// =======================================================
 std::atomic<int> diag_iq_rx(0);
 std::atomic<int> diag_iq_drop(0);
 std::atomic<int> diag_pcm_gen(0);
@@ -135,26 +120,23 @@ static int connectToRelay(const char* host, int port) {
     }
     freeaddrinfo(res);
 
-    // Disable Nagle for low-latency IQ streaming
     int flag = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
     return fd;
 }
 
-// Read exactly n bytes from a socket (handles partial reads)
 static bool recvExact(int fd, void* buf, size_t n) {
     size_t total = 0;
     uint8_t* p = static_cast<uint8_t*>(buf);
     while (total < n) {
         ssize_t r = recv(fd, p + total, n - total, 0);
-        if (r <= 0) return false;  // disconnect or error
+        if (r <= 0) return false;
         total += r;
     }
     return true;
 }
 
-// Send a newline-delimited JSON command on the control socket
 static bool sendCtrlCommand(const std::string& json_str) {
     std::lock_guard<std::mutex> lock(g_ctrl_mtx);
     int fd = g_ctrl_fd.load(std::memory_order_relaxed);
@@ -167,12 +149,7 @@ static bool sendCtrlCommand(const std::string& json_str) {
 
 
 // =======================================================
-// IQ INGEST (replaces broadcastAudio — same ring buffer logic)
-// =======================================================
-// This function is identical to the original broadcastAudio().
-// It takes interleaved IQ samples and feeds them into iq_pool[].
-// The ONLY difference is who calls it: previously the SDRplay USB
-// callback, now the TCP reader thread.
+// IQ INGEST (replaces broadcastAudio)
 // =======================================================
 void feedIQToPool(const std::vector<int16_t>& iqBuffer) {
     if (++g_heartbeat_count % 100 == 0) {
@@ -220,15 +197,7 @@ void feedIQToPool(const std::vector<int16_t>& iqBuffer) {
 
 
 // =======================================================
-// THREAD 1: TCP READER (replaces USB Dongle callback)
-// =======================================================
-// Connects to the sdr-relay's DATA port, reads framed IQ chunks,
-// and pushes them into the ring buffer via feedIQToPool().
-//
-// Wire format per chunk:
-//   [4 bytes: magic 0x49515043]
-//   [4 bytes: num_samples as uint32_t, network byte order]
-//   [num_samples * 2 * sizeof(int16_t) bytes: interleaved I,Q]
+// THREAD 1: TCP READER
 // =======================================================
 void tcpReaderThread(const char* host, int port) {
     std::vector<int16_t> recv_buf;
@@ -243,14 +212,12 @@ void tcpReaderThread(const char* host, int port) {
             continue;
         }
 
-        // Increase receive buffer for bursty IQ traffic
         int rcvbuf = 2 * 1024 * 1024;
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
         std::cout << "[TCP-IQ] Connected to relay data stream." << std::endl;
 
         while (true) {
-            // Read frame header: magic + num_samples
             uint32_t header[2];
             if (!recvExact(fd, header, sizeof(header))) {
                 std::cerr << "[TCP-IQ] Disconnected from relay (header read)." << std::endl;
@@ -273,7 +240,6 @@ void tcpReaderThread(const char* host, int port) {
                 break;
             }
 
-            // Read IQ payload: num_samples * 2 int16_t values (I, Q interleaved)
             size_t payload_ints = num_samples * 2;
             recv_buf.resize(payload_ints);
 
@@ -283,7 +249,6 @@ void tcpReaderThread(const char* host, int port) {
                 break;
             }
 
-            // Feed directly into the DSP ring buffer
             feedIQToPool(recv_buf);
         }
 
@@ -295,7 +260,7 @@ void tcpReaderThread(const char* host, int port) {
 
 
 // =======================================================
-// BIQUAD FILTER (standard second-order IIR section)
+// BIQUAD FILTER
 // =======================================================
 struct Biquad {
     double b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
@@ -310,7 +275,6 @@ struct Biquad {
 
     void reset() { x1 = x2 = y1 = y2 = 0; }
 
-    // Audio EQ Cookbook: low-pass biquad via bilinear transform
     static Biquad lowPass(double fc, double fs, double Q) {
         double w0    = 2.0 * M_PI * fc / fs;
         double alpha = std::sin(w0) / (2.0 * Q);
@@ -331,72 +295,40 @@ struct Biquad {
 // =======================================================
 // THREAD 2: DEMOD THREAD — Clean FM Broadcast DSP
 // =======================================================
-// With the USB bottleneck eliminated, this is now a textbook
-// FM mono demodulator.  No sinc compensators, no notch filters,
-// no single-pole hacks.
-//
-// Pipeline (500 kHz IQ rate from relay with decimation=4):
-//   1. Channel filter: 4th-order Butterworth LPF @ 100 kHz
-//      Rejects adjacent FM stations (200 kHz spacing)
-//   2. FM discriminator: atan2 + phase unwrap
-//   3. Audio LPF: 4th-order Butterworth @ 15 kHz
-//      Removes 19 kHz pilot, subcarrier, and noise
-//   4. De-emphasis: 75 µs (US/Americas standard)
-//   5. Fractional resampler: 500 kHz → 16 kHz (linear interp)
-//   6. Output: 16 kHz mono PCM for Whisper transcription
-// =======================================================
 void demodThread() {
     std::cout << "[DEMOD] *** BUILD v13-CLEAN: Butterworth ch@100k + audio@15k, "
-              << "75µs de-emph, 500k→16k linear resamp ***" << std::endl;
+              << "75us de-emph, 500k->16k linear resamp ***" << std::endl;
 
-    // === IQ Sample Rate (must match relay decimation config) ===
-    const double IQ_RATE    = 500000.0;   // 2 MHz / 4
+    const double IQ_RATE    = 500000.0;
     const double AUDIO_RATE = 16000.0;
-    const float  RESAMP_RATIO = static_cast<float>(AUDIO_RATE / IQ_RATE);  // 0.032
+    const float  RESAMP_RATIO = static_cast<float>(AUDIO_RATE / IQ_RATE);
 
-    // === Channel Filter: 4th-order Butterworth LPF, fc=100 kHz ===
-    // Two cascaded biquads per channel (I and Q independently).
-    // Butterworth Q values for 4th order: 0.5412 and 1.3066
     Biquad ch_i1 = Biquad::lowPass(100000.0, IQ_RATE, 0.5412);
     Biquad ch_i2 = Biquad::lowPass(100000.0, IQ_RATE, 1.3066);
     Biquad ch_q1 = Biquad::lowPass(100000.0, IQ_RATE, 0.5412);
     Biquad ch_q2 = Biquad::lowPass(100000.0, IQ_RATE, 1.3066);
 
-    // === FM Discriminator State ===
     float prev_phase = 0.0f;
 
-    // === Audio LPF: 4th-order Butterworth, fc=15 kHz ===
-    // Runs at the full 500 kHz IQ rate (before decimation) for
-    // maximum anti-alias rejection before the resampler.
     Biquad aud1 = Biquad::lowPass(15000.0, IQ_RATE, 0.5412);
     Biquad aud2 = Biquad::lowPass(15000.0, IQ_RATE, 1.3066);
 
-    // === De-emphasis: 75 µs time constant (US standard) ===
-    // First-order IIR: y[n] = (1-d)*x[n] + d*y[n-1]
-    const double de_d = std::exp(-1.0 / (75.0e-6 * IQ_RATE));   // ≈ 0.9737
+    const double de_d = std::exp(-1.0 / (75.0e-6 * IQ_RATE));
     double de_state = 0.0;
 
-    // === FM Gain ===
-    // Max phase_diff for ±75 kHz deviation at 500 kHz = ±0.94 rad.
-    // After LPF + de-emphasis, speech sits well below that.
-    // Gain of 2.0 produces healthy PCM levels without clipping.
     const float FM_GAIN = 2.0f;
 
-    // === Fractional Resampler with Linear Interpolation ===
     float resamp_phase = 0.0f;
-    float prev_audio   = 0.0f;   // previous audio sample for interpolation
+    float prev_audio   = 0.0f;
 
     int pcm_idx = 0;
     size_t out_len = 0;
     bool pcm_acquired = false;
 
     auto diag_wall_start = std::chrono::steady_clock::now();
-
-    // === Diagnostic: track effective IQ rate ===
-    const int DIAG_IQ_PERIOD = 500000;  // Report every 500k samples (1 sec at 500 kHz)
+    const int DIAG_IQ_PERIOD = 500000;
 
     while (true) {
-        // ---- Gap recovery: reset all filter state ----
         if (g_stream_gap.exchange(false, std::memory_order_acq_rel)) {
             ch_i1.reset(); ch_i2.reset();
             ch_q1.reset(); ch_q2.reset();
@@ -422,7 +354,6 @@ void demodThread() {
 
         auto start_time = std::chrono::high_resolution_clock::now();
 
-        // Acquire a PCM output slot if we don't have one
         if (!pcm_acquired) {
             pcm_idx = pcm_write_idx.load(std::memory_order_relaxed) % POOL_SIZE;
             if (!pcm_pool[pcm_idx].in_use.load(std::memory_order_acquire)) {
@@ -432,40 +363,32 @@ void demodThread() {
             }
         }
 
-        // ---- Process every IQ sample in this chunk ----
         for (size_t i = 0; i < iq_pool[idx].len; i++) {
             float raw_i = static_cast<float>(iq_pool[idx].data[2 * i]);
             float raw_q = static_cast<float>(iq_pool[idx].data[2 * i + 1]);
 
-            // 1. Channel filter (4th-order Butterworth, fc=100 kHz)
             double fi = ch_i2.process(ch_i1.process(static_cast<double>(raw_i)));
             double fq = ch_q2.process(ch_q1.process(static_cast<double>(raw_q)));
 
-            // 2. FM discriminator: atan2 phase + unwrapped diff
             float current_phase = std::atan2(static_cast<float>(fq), static_cast<float>(fi));
             float phase_diff = current_phase - prev_phase;
             if (phase_diff >  M_PI) phase_diff -= 2.0f * M_PI;
             if (phase_diff < -M_PI) phase_diff += 2.0f * M_PI;
             prev_phase = current_phase;
 
-            // 3. Audio LPF (4th-order Butterworth, fc=15 kHz)
             double audio = aud2.process(aud1.process(static_cast<double>(phase_diff)));
 
-            // 4. De-emphasis: 75 µs (US standard)
             de_state = (1.0 - de_d) * audio + de_d * de_state;
 
             float current_audio = static_cast<float>(de_state) * FM_GAIN;
 
-            // 5. Fractional resampler: 500 kHz → 16 kHz with linear interpolation
             resamp_phase += RESAMP_RATIO;
             if (resamp_phase >= 1.0f) {
                 resamp_phase -= 1.0f;
 
-                // Linear interpolation between previous and current sample
                 float t = resamp_phase / RESAMP_RATIO;
                 float sample = prev_audio * (1.0f - t) + current_audio * t;
 
-                // Hard clamp to [-1, 1]
                 if (sample >  1.0f) sample =  1.0f;
                 if (sample < -1.0f) sample = -1.0f;
 
@@ -500,7 +423,6 @@ void demodThread() {
             prev_audio = current_audio;
         }
 
-        // Release the IQ slot
         iq_pool[idx].ready.store(false, std::memory_order_release);
         iq_pool[idx].in_use.store(false, std::memory_order_release);
         iq_read_idx.fetch_add(1, std::memory_order_relaxed);
@@ -508,7 +430,6 @@ void demodThread() {
         auto end_time = std::chrono::high_resolution_clock::now();
         diag_demod_time_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count(), std::memory_order_relaxed);
 
-        // ---- Diagnostics: report every 500k IQ samples (≈1 second) ----
         int current_iq_rx = diag_iq_rx.load();
         if (current_iq_rx >= DIAG_IQ_PERIOD) {
             diag_iq_rx.fetch_sub(DIAG_IQ_PERIOD, std::memory_order_relaxed);
@@ -530,9 +451,9 @@ void demodThread() {
             std::cout << "  -> Wall Clock    : " << wall_sec << " sec (Expected: ~1.0s)" << std::endl;
             std::cout << "  -> Effective Rate: " << effective_iq_rate << " IQ/sec (Expected: 500000)" << std::endl;
             std::cout << "  -> Math CPU Load : " << cpu_percent << "%" << std::endl;
-            std::cout << "  -> IQ Dropped    : " << d_iq << " samples (If > 0: CPU is too slow)" << std::endl;
+            std::cout << "  -> IQ Dropped    : " << d_iq << " samples" << std::endl;
             std::cout << "  -> Audio Gen     : " << d_pgen << " samples" << std::endl;
-            std::cout << "  -> Audio Dropped : " << d_pdrp << " samples (If > 0: Output thread/Redis is blocking)" << std::endl;
+            std::cout << "  -> Audio Dropped : " << d_pdrp << " samples" << std::endl;
             std::cout << "  -> Audio Written : " << d_pwrt << " samples" << std::endl;
             std::cout << "=============================================\n" << std::endl;
         }
@@ -541,7 +462,7 @@ void demodThread() {
 
 
 // =======================================================
-// THREAD 3: OUTPUT THREAD  (100% UNCHANGED from original)
+// THREAD 3: OUTPUT THREAD
 // =======================================================
 void outputThread() {
     redisContext* local_redis = redisConnect("ag-redis", 6379);
@@ -582,10 +503,6 @@ void outputThread() {
 // =======================================================
 // THREAD 4: CONTROL SOCKET READER
 // =======================================================
-// Reads newline-delimited JSON events from the relay's control port
-// and publishes them to Redis so the existing api-core/frontend
-// pipeline works without any changes.
-// =======================================================
 void ctrlReaderThread(const char* host, int port) {
     while (true) {
         std::cout << "[TCP-CTRL] Connecting to relay control at "
@@ -601,7 +518,6 @@ void ctrlReaderThread(const char* host, int port) {
         g_ctrl_fd.store(fd, std::memory_order_release);
         std::cout << "[TCP-CTRL] Connected to relay control channel." << std::endl;
 
-        // Line-buffered reader
         std::string line_buf;
         char chunk[4096];
 
@@ -611,7 +527,6 @@ void ctrlReaderThread(const char* host, int port) {
 
             line_buf.append(chunk, n);
 
-            // Process complete lines
             size_t pos;
             while ((pos = line_buf.find('\n')) != std::string::npos) {
                 std::string line = line_buf.substr(0, pos);
@@ -627,7 +542,6 @@ void ctrlReaderThread(const char* host, int port) {
 
                 std::string event = json.has("event") ? std::string(json["event"].s()) : "";
 
-                // ---- scan_complete: relay finished scanning, forward to Redis ----
                 if (event == "scan_complete") {
                     std::cout << "[TCP-CTRL] Received scan_complete from relay." << std::endl;
                     g_scanning.store(false, std::memory_order_release);
@@ -637,11 +551,9 @@ void ctrlReaderThread(const char* host, int port) {
                         g_redis_pub, "PUBLISH ws_updates %s", line.c_str());
                     if (r) freeReplyObject(r);
                 }
-                // ---- configure_ack: relay confirmed hardware settings ----
                 else if (event == "configure_ack") {
                     std::cout << "[TCP-CTRL] Relay confirmed hardware config." << std::endl;
                 }
-                // ---- Forward any other relay events to Redis ----
                 else if (!event.empty()) {
                     std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
                     redisReply* r = (redisReply*)redisCommand(
@@ -661,11 +573,6 @@ void ctrlReaderThread(const char* host, int port) {
 
 // =======================================================
 // THREAD 5: REDIS COMMAND LISTENER
-// =======================================================
-// Subscribes to Redis sdr_commands (same as before) but instead
-// of calling SdrHandler methods, forwards commands to the relay
-// over the TCP control socket.  Local responsibilities like WAV
-// recording and mode management stay here.
 // =======================================================
 void commandListener() {
     redisContext* c = redisConnect("ag-redis", 6379);
@@ -703,6 +610,8 @@ void commandListener() {
             g_current_freq = targetFreq;
 
             // ---- TUNE: forward to relay (blocked only during scan) ----
+            // FIX: sendCtrlCommand is fast (mutex + send) — no thread needed.
+            // Wrapping it in a thread added scheduling latency and was unnecessary.
             if (cmd == "TUNE" && !g_scanning.load(std::memory_order_relaxed)) {
                 crow::json::wvalue relay_cmd;
                 relay_cmd["command"] = "TUNE";
@@ -715,9 +624,6 @@ void commandListener() {
                 g_recording.store(true, std::memory_order_release);
 
                 std::thread([targetFreq]() {
-                    // Only reconfigure hardware if live_listen isn't already
-                    // streaming on the same frequency — avoids a brief glitch.
-                    // If live_listen IS active, the hardware is already set up.
                     if (!g_live_listen.load(std::memory_order_relaxed)) {
                         crow::json::wvalue hw_cmd;
                         hw_cmd["command"] = "CONFIGURE";
@@ -729,7 +635,6 @@ void commandListener() {
                         sendCtrlCommand(hw_cmd.dump());
                         std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     } else {
-                        // Already live — just make sure we're on the right freq
                         crow::json::wvalue tune_cmd;
                         tune_cmd["command"] = "TUNE";
                         tune_cmd["freq"]    = targetFreq;
@@ -737,7 +642,9 @@ void commandListener() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
 
-                    // Local WAV file management
+                    // Ensure the output directory exists
+                    mkdir("/app/shared/audio", 0755);
+
                     std::string filename = "/app/shared/audio/audio.wav";
                     SF_INFO sfinfo;
                     std::memset(&sfinfo, 0, sizeof(sfinfo));
@@ -747,8 +654,20 @@ void commandListener() {
 
                     {
                         std::lock_guard<std::mutex> lock(g_wav_mtx);
-                        g_wav_file         = sf_open(filename.c_str(), SFM_WRITE, &sfinfo);
-                        g_wav_write_active = true;
+                        g_wav_file = sf_open(filename.c_str(), SFM_WRITE, &sfinfo);
+                        if (g_wav_file) {
+                            g_wav_write_active = true;
+                            std::cout << "[Recorder] WAV file opened: " << filename << std::endl;
+                        } else {
+                            std::cerr << "[Recorder] FAILED to open WAV file: " << filename
+                                      << " — sf_error: " << sf_strerror(nullptr) << std::endl;
+                        }
+                    }
+
+                    if (!g_wav_file) {
+                        std::cerr << "[Recorder] Aborting — no file handle." << std::endl;
+                        g_recording.store(false, std::memory_order_release);
+                        return;
                     }
 
                     std::cout << "[Recorder] Writing 16kHz audio for "
@@ -760,8 +679,10 @@ void commandListener() {
 
                     {
                         std::lock_guard<std::mutex> lock(g_wav_mtx);
-                        sf_close(g_wav_file);
-                        g_wav_file = nullptr;
+                        if (g_wav_file) {
+                            sf_close(g_wav_file);
+                            g_wav_file = nullptr;
+                        }
                     }
                     std::cout << "[Recorder] Complete." << std::endl;
 
@@ -781,7 +702,6 @@ void commandListener() {
                 if (!freqProvided) {
                     std::cerr << "[LIVE_LISTEN] REJECTED — no freq in command." << std::endl;
                 } else if (g_live_listen.load(std::memory_order_relaxed)) {
-                    // Already live — just retune if frequency changed
                     crow::json::wvalue tune_cmd;
                     tune_cmd["command"] = "TUNE";
                     tune_cmd["freq"]    = targetFreq;
@@ -791,7 +711,6 @@ void commandListener() {
                     g_live_listen.store(true, std::memory_order_release);
 
                     std::thread([targetFreq]() {
-                        // Only reconfigure hardware if not already recording
                         if (!g_recording.load(std::memory_order_relaxed)) {
                             crow::json::wvalue hw_cmd;
                             hw_cmd["command"] = "CONFIGURE";
@@ -814,12 +733,12 @@ void commandListener() {
                     }).detach();
                 }
             }
-            // ---- STOP_LIVE: clear live flag only (recording continues unaffected) ----
+            // ---- STOP_LIVE ----
             else if (cmd == "STOP_LIVE" && g_live_listen.load(std::memory_order_relaxed)) {
                 g_live_listen.store(false, std::memory_order_release);
                 std::cout << "[Live] Stopped." << std::endl;
             }
-            // ---- SCAN: exclusive — only when nothing else is active ----
+            // ---- SCAN: exclusive ----
             else if (cmd == "SCAN" && !g_scanning.load(std::memory_order_relaxed)
                                    && !g_recording.load(std::memory_order_relaxed)
                                    && !g_live_listen.load(std::memory_order_relaxed)) {
@@ -828,79 +747,11 @@ void commandListener() {
                 relay_cmd["command"] = "SCAN";
                 sendCtrlCommand(relay_cmd.dump());
                 std::cout << "[SCAN] Delegated to relay." << std::endl;
-                // ctrlReaderThread will receive scan_complete and publish to Redis
             }
         }
         if (reply) freeReplyObject(reply);
     }
     redisFree(c);
-}
-
-// =======================================================
-// MOCK MODE ROUTER (NO HARDWARE FALLBACK)
-// =======================================================
-void runMockMode() {
-    redisContext *sub = redisConnect("ag-redis", 6379);
-    redisContext *pub = redisConnect("ag-redis", 6379);
-
-    if (!sub || sub->err || !pub || pub->err) {
-        std::cerr << "[Mock SDR] Failed to connect to Redis." << std::endl;
-        return;
-    }
-
-    redisReply *reply = (redisReply*)redisCommand(sub, "SUBSCRIBE sdr_commands");
-    if (reply) freeReplyObject(reply);
-
-    std::cout << "[Mock SDR] Listening for commands..." << std::endl;
-
-    while (redisGetReply(sub, (void**)&reply) == REDIS_OK) {
-        if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
-            auto json = crow::json::load(reply->element[2]->str);
-            if (!json) continue;
-
-            std::string cmd = json["command"].s();
-
-            if (cmd == "TUNE") {
-                double freq = json["freq"].d();
-                std::cout << "[Mock SDR] Tuning to " << freq << " MHz (Simulated)" << std::endl;
-            }
-            else if (cmd == "RECORD") {
-                double targetFreq = json["freq"].d();
-                std::cout << "[Mock SDR] Recording " << targetFreq << " MHz (Simulating 3 seconds)..." << std::endl;
-                
-                // Simulate recording delay
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-
-                // Copy dummy file into the hot seat for the AI worker
-                std::system("cp /app/shared/audio/dummy.wav /app/shared/audio/audio.wav");
-
-                crow::json::wvalue msg;
-                msg["event"] = "record_complete";
-                msg["freq"] = targetFreq;
-                msg["file"] = "/app/shared/audio/audio.wav";
-                
-                std::cout << "[Mock SDR] Record complete. Alerting AI Worker." << std::endl;
-                redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
-            }
-            else if (cmd == "SCAN") {
-                std::cout << "[Mock SDR] Sweeping spectrum (Simulating 4 seconds)..." << std::endl;
-                std::this_thread::sleep_for(std::chrono::seconds(4));
-
-                crow::json::wvalue msg;
-                msg["event"] = "scan_complete";
-                msg["stations"][0]["freq"] = 154.280;
-                msg["stations"][0]["name"] = "Mock Police Dispatch";
-                msg["stations"][1]["freq"] = 462.562;
-                msg["stations"][1]["name"] = "Mock Fast Food";
-                msg["stations"][2]["freq"] = 162.550;
-                msg["stations"][2]["name"] = "Mock NOAA Weather";
-
-                std::cout << "[Mock SDR] Sweep complete. Sending mock stations to React." << std::endl;
-                redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
-            }
-        }
-        if (reply) freeReplyObject(reply);
-    }
 }
 
 
@@ -910,7 +761,6 @@ void runMockMode() {
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
 
-    // Read relay connection info from environment
     const char* relay_host_env = std::getenv("SDR_RELAY_HOST");
     const char* relay_data_env = std::getenv("SDR_RELAY_DATA_PORT");
     const char* relay_ctrl_env = std::getenv("SDR_RELAY_CTRL_PORT");
@@ -925,14 +775,12 @@ int main() {
     std::cout << "  Ctrl Port  : " << relay_ctrl_port << std::endl;
     std::cout << "=============================================\n" << std::endl;
 
-    // Connect to Redis
     g_redis_pub = redisConnect("ag-redis", 6379);
     if (!g_redis_pub || g_redis_pub->err) {
         std::cerr << "[SDR-DAEMON] Redis connection failed!" << std::endl;
         return 1;
     }
 
-    // Start demod thread with RT priority (unchanged)
     std::thread demod_t(demodThread);
     {
         struct sched_param sp;
@@ -949,18 +797,12 @@ int main() {
     }
     demod_t.detach();
 
-    // Start output thread (unchanged)
     std::thread(outputThread).detach();
-
-    // Start TCP control channel reader (receives events from relay)
     std::thread(ctrlReaderThread, relay_host.c_str(), relay_ctrl_port).detach();
-
-    // Start TCP IQ data reader (replaces USB callback as IQ source)
     std::thread(tcpReaderThread, relay_host.c_str(), relay_data_port).detach();
 
     std::cout << "[SDR-DAEMON] Pipeline active. Waiting for relay connection..." << std::endl;
 
-    // Block on Redis command listener (same as original blocking on commandListener)
     commandListener();
 
     return 0;

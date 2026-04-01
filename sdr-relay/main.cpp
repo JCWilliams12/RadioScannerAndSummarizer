@@ -41,7 +41,6 @@
     #include <ws2tcpip.h>
     #pragma comment(lib, "ws2_32.lib")
 
-    // Type shims
     using ssize_t   = int;
     using socklen_t = int;
     using socket_t  = SOCKET;
@@ -50,14 +49,12 @@
 
     inline int close_socket(socket_t fd) { return closesocket(fd); }
 
-    // Windows setsockopt takes (const char*) where POSIX takes (const void*)
     inline int setsockopt_compat(socket_t s, int level, int optname,
                                  const void* optval, int optlen) {
         return setsockopt(s, level, optname,
                           reinterpret_cast<const char*>(optval), optlen);
     }
 
-    // Windows send takes (const char*) where POSIX takes (const void*)
     inline ssize_t send_compat(socket_t s, const void* buf, size_t len, int flags) {
         return send(s, reinterpret_cast<const char*>(buf), static_cast<int>(len), flags);
     }
@@ -112,13 +109,26 @@ std::mutex              g_heartbeat_mtx;
 std::condition_variable g_heartbeat_cv;
 std::atomic<long>       g_heartbeat_count(0);
 
+// Active control client — allows async operations (like SCAN) to send
+// responses back on the control socket from a worker thread.
+static std::atomic<socket_t> g_ctrl_client_fd(static_cast<socket_t>(-1));
+static std::mutex            g_ctrl_send_mtx;
+
+static void sendCtrlResponse(const std::string& json_str) {
+    std::lock_guard<std::mutex> lock(g_ctrl_send_mtx);
+    socket_t fd = g_ctrl_client_fd.load(std::memory_order_relaxed);
+    if (fd == static_cast<socket_t>(-1)) return;
+    std::string msg = json_str + "\n";
+    send_compat(fd, msg.c_str(), msg.size(), MSG_NOSIGNAL);
+}
+
 
 // =======================================================
-// RELAY IQ RING BUFFER (USB callback → TCP sender)
+// RELAY IQ RING BUFFER (USB callback -> TCP sender)
 // =======================================================
 struct RelaySlot {
-    std::array<int16_t, relay::SLOT_SAMPLES * 2> data;   // interleaved I,Q
-    uint32_t num_samples;                                  // IQ pairs in this slot
+    std::array<int16_t, relay::SLOT_SAMPLES * 2> data;
+    uint32_t num_samples;
     std::atomic<bool> ready{false};
 };
 
@@ -132,18 +142,11 @@ static std::mutex              g_relay_mtx;
 // =======================================================
 // broadcastAudio() — called by sdr_handler.cpp's USB callback
 // =======================================================
-// Pushes interleaved IQ into the relay ring buffer.  The TCP
-// sender thread picks it up and frames it over the network.
-// This function runs in the SDRplay callback thread — keep it fast.
-// =======================================================
 void broadcastAudio(const std::vector<int16_t>& iqBuffer) {
-    // Heartbeat always ticks (even during SCANNING) so the
-    // scanner's getValidatedPower() can detect liveness.
     if (++g_heartbeat_count % 100 == 0) {
         g_heartbeat_cv.notify_all();
     }
 
-    // During scanning, skip IQ relay — only power readings matter
     if (g_mode == DeviceMode::SCANNING || iqBuffer.empty()) return;
 
     uint32_t num_iq_pairs = static_cast<uint32_t>(iqBuffer.size() / 2);
@@ -153,7 +156,6 @@ void broadcastAudio(const std::vector<int16_t>& iqBuffer) {
     RelaySlot& slot = g_relay_pool[idx];
 
     if (slot.ready.load(std::memory_order_acquire)) {
-        // Overrun — TCP sender can't keep up.  Drop this chunk.
         return;
     }
 
@@ -169,7 +171,7 @@ void broadcastAudio(const std::vector<int16_t>& iqBuffer) {
 // TCP DATA CLIENT TRACKING
 // =======================================================
 static std::mutex         g_clients_mtx;
-static std::vector<socket_t> g_data_clients;   // connected data socket FDs
+static std::vector<socket_t> g_data_clients;
 
 static void addDataClient(socket_t fd) {
     std::lock_guard<std::mutex> lock(g_clients_mtx);
@@ -192,11 +194,7 @@ static void removeDataClient(socket_t fd) {
 // =======================================================
 // TCP DATA SENDER THREAD
 // =======================================================
-// Reads IQ chunks from the relay ring buffer, frames them with
-// the iq_protocol header, and sends to all connected data clients.
-// =======================================================
 void dataSenderThread() {
-    // Pre-allocate frame buffer: header + max payload
     const size_t max_frame = 8 + (relay::SLOT_SAMPLES * 2 * sizeof(int16_t));
     std::vector<uint8_t> frame(max_frame);
 
@@ -213,7 +211,6 @@ void dataSenderThread() {
         uint32_t num_samples = slot.num_samples;
         size_t payload_bytes = num_samples * 2 * sizeof(int16_t);
 
-        // Build frame: [magic][count][IQ payload]
         uint32_t net_magic  = htonl(0x49515043);
         uint32_t net_count  = htonl(num_samples);
         std::memcpy(frame.data(),     &net_magic, 4);
@@ -222,11 +219,9 @@ void dataSenderThread() {
 
         size_t frame_len = 8 + payload_bytes;
 
-        // Release slot before the potentially slow send()
         slot.ready.store(false, std::memory_order_release);
         g_relay_read.fetch_add(1, std::memory_order_relaxed);
 
-        // Send to all connected data clients
         std::vector<socket_t> dead_fds;
         {
             std::lock_guard<std::mutex> lock(g_clients_mtx);
@@ -271,7 +266,6 @@ void dataAcceptThread() {
         socket_t client_fd = accept(srv, (struct sockaddr*)&client_addr, &client_len);
         if (client_fd < 0) continue;
 
-        // Tune socket for IQ streaming
         int flag = 1;
         setsockopt_compat(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
         int sndbuf = relay::TCP_SNDBUF_SIZE;
@@ -283,9 +277,9 @@ void dataAcceptThread() {
 
 
 // =======================================================
-// HARDWARE HELPERS (moved from sdr-daemon)
+// HARDWARE HELPERS
 // =======================================================
-extern std::atomic<float> g_fast_power;   // defined in sdr_handler.cpp
+extern std::atomic<float> g_fast_power;
 
 void setBandwidth(SdrHandler* sdr, sdrplay_api_Bw_MHzT bw, sdrplay_api_If_kHzT ifMode) {
     sdrplay_api_DeviceParamsT* params = nullptr;
@@ -299,7 +293,6 @@ void setBandwidth(SdrHandler* sdr, sdrplay_api_Bw_MHzT bw, sdrplay_api_If_kHzT i
         sdrplay_api_Update_Ext1_None);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    // Re-assert decimation
     params->rxChannelA->ctrlParams.decimation.enable          = 1;
     params->rxChannelA->ctrlParams.decimation.decimationFactor = relay::DECIMATION_FACTOR;
     params->rxChannelA->ctrlParams.decimation.wideBandSignal   = 0;
@@ -329,9 +322,6 @@ float getValidatedPower(SdrHandler* sdr) {
 // =======================================================
 // CONTROL COMMAND DISPATCH
 // =======================================================
-// Handles a single parsed JSON command from the sdr-daemon.
-// Returns a JSON string response (event) or empty string for no response.
-// =======================================================
 std::string handleCommand(SdrHandler* sdr, const json& cmd) {
     std::string command = cmd.value("command", "");
 
@@ -340,25 +330,27 @@ std::string handleCommand(SdrHandler* sdr, const json& cmd) {
         double freq = cmd.value("freq", 88.1);
         sdr->TuneFrequency(freq * 1000000.0);
         std::cout << "[CTRL] Tuned to " << freq << " MHz" << std::endl;
-        return "";  // no response needed
+        return "";
     }
 
     // ---- CONFIGURE: set BW, IF mode, AGC, LNA, tune ----
+    // FIX: This MUST be synchronous.  The SDRplay API is not thread-safe —
+    // if we spawn a thread here, it can race with the USB callback thread
+    // or a concurrent SCAN thread calling sdrplay_api_Update().  The 200ms
+    // block is acceptable; only SCAN (10+ seconds) needs to be async.
     if (command == "CONFIGURE") {
         double freq     = cmd.value("freq", 88.1);
         std::string bw  = cmd.value("bw", "BW_0_200");
         std::string agc = cmd.value("agc", "off");
         int lna         = cmd.value("lna", 4);
 
-        // Bandwidth mapping
-        sdrplay_api_Bw_MHzT bwEnum = sdrplay_api_BW_0_300; 
-        if (bw == "BW_1_536")  bwEnum = sdrplay_api_BW_1_536;
-        else if (bw == "BW_0_600") bwEnum = sdrplay_api_BW_0_600;
-        else if (bw == "BW_0_200") bwEnum = sdrplay_api_BW_0_200;
+        sdrplay_api_Bw_MHzT bwEnum = sdrplay_api_BW_0_200;
+        if (bw == "BW_1_536")       bwEnum = sdrplay_api_BW_1_536;
+        else if (bw == "BW_0_600")  bwEnum = sdrplay_api_BW_0_600;
+        else if (bw == "BW_0_300")  bwEnum = sdrplay_api_BW_0_300;
 
         setBandwidth(sdr, bwEnum, sdrplay_api_IF_Zero);
 
-        // AGC + LNA
         sdrplay_api_DeviceParamsT* params = nullptr;
         sdrplay_api_GetDeviceParams(sdr->getDeviceHandle()->dev, &params);
         if (params && params->rxChannelA) {
@@ -377,86 +369,84 @@ std::string handleCommand(SdrHandler* sdr, const json& cmd) {
         return json({{"event", "configure_ack"}}).dump();
     }
 
-    // ---- SCAN: wideband FM scan (moved from sdr-daemon) ----
+    // ---- SCAN: wideband FM scan — runs asynchronously ----
     if (command == "SCAN") {
-        std::cout << "[CTRL] Starting wideband scan..." << std::endl;
+        std::cout << "[CTRL] Starting wideband scan (async)..." << std::endl;
         g_mode = DeviceMode::SCANNING;
 
-        setBandwidth(sdr, sdrplay_api_BW_0_200, sdrplay_api_IF_Zero);
+        std::thread([sdr]() {
+            setBandwidth(sdr, sdrplay_api_BW_0_200, sdrplay_api_IF_Zero);
 
-        // High LNA for scanning sensitivity
-        sdrplay_api_DeviceParamsT* params = nullptr;
-        sdrplay_api_GetDeviceParams(sdr->getDeviceHandle()->dev, &params);
-        if (params && params->rxChannelA) {
-            params->rxChannelA->ctrlParams.agc.enable     = sdrplay_api_AGC_DISABLE;
-            params->rxChannelA->tunerParams.gain.LNAstate = 2;
-            sdrplay_api_Update(sdr->getDeviceHandle()->dev, sdr->getDeviceHandle()->tuner,
-                (sdrplay_api_ReasonForUpdateT)(sdrplay_api_Update_Ctrl_Agc | sdrplay_api_Update_Tuner_Gr),
-                sdrplay_api_Update_Ext1_None);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            sdrplay_api_DeviceParamsT* params = nullptr;
+            sdrplay_api_GetDeviceParams(sdr->getDeviceHandle()->dev, &params);
+            if (params && params->rxChannelA) {
+                params->rxChannelA->ctrlParams.agc.enable     = sdrplay_api_AGC_DISABLE;
+                params->rxChannelA->tunerParams.gain.LNAstate = 8;
+                sdrplay_api_Update(sdr->getDeviceHandle()->dev, sdr->getDeviceHandle()->tuner,
+                    (sdrplay_api_ReasonForUpdateT)(sdrplay_api_Update_Ctrl_Agc | sdrplay_api_Update_Tuner_Gr),
+                    sdrplay_api_Update_Ext1_None);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
-        // Measure noise floor at 87.9 MHz (below FM band)
-        sdr->TuneFrequency(87.9 * 1000000.0);
-        float noiseFloor = getValidatedPower(sdr);
-        if (noiseFloor <= -99.0f) noiseFloor = -85.0f;
-        float squelchThreshold = noiseFloor + relay::SCAN_SQUELCH_DB;
+            sdr->TuneFrequency(87.9 * 1000000.0);
+            float noiseFloor = getValidatedPower(sdr);
+            if (noiseFloor <= -99.0f) noiseFloor = -85.0f;
+            float squelchThreshold = noiseFloor + relay::SCAN_SQUELCH_DB;
 
-        std::cout << "[Scanner] Noise floor: " << noiseFloor
-                  << " dBFS, squelch: " << squelchThreshold << " dBFS" << std::endl;
+            std::cout << "[Scanner] Noise floor: " << noiseFloor
+                      << " dBFS, squelch: " << squelchThreshold << " dBFS" << std::endl;
 
-        json found_stations = json::array();
+            json found_stations = json::array();
+            double bestFreq     = 0.0;
+            float  bestRssi     = -999.0f;
+            bool   inCluster    = false;
+            int    clusterSteps = 0;
 
-        double bestFreq     = 0.0;
-        float  bestRssi     = -999.0f;
-        bool   inCluster    = false;
-        int    clusterSteps = 0;
+            for (double freqMHz = relay::SCAN_START_MHZ;
+                 freqMHz <= relay::SCAN_END_MHZ;
+                 freqMHz += relay::SCAN_STEP_MHZ) {
 
-        for (double freqMHz = relay::SCAN_START_MHZ;
-             freqMHz <= relay::SCAN_END_MHZ;
-             freqMHz += relay::SCAN_STEP_MHZ) {
+                sdr->TuneFrequency(freqMHz * 1000000.0);
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                float currentRssi = getValidatedPower(sdr);
 
-            sdr->TuneFrequency(freqMHz * 1000000.0);
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-
-            float currentRssi = getValidatedPower(sdr);
-
-            if (currentRssi >= squelchThreshold) {
-                inCluster = true;
-                clusterSteps++;
-                int freq10 = static_cast<int>(std::round(freqMHz * 10.0));
-                if (freq10 % 2 != 0) {
-                    if (currentRssi > bestRssi) {
-                        bestRssi = currentRssi;
-                        bestFreq = freqMHz;
+                if (currentRssi >= squelchThreshold) {
+                    inCluster = true;
+                    clusterSteps++;
+                    int freq10 = static_cast<int>(std::round(freqMHz * 10.0));
+                    if (freq10 % 2 != 0) {
+                        if (currentRssi > bestRssi) {
+                            bestRssi = currentRssi;
+                            bestFreq = freqMHz;
+                        }
                     }
-                }
-            } else {
-                if (inCluster) {
-                    if (clusterSteps >= 2 && bestFreq > 0.0) {
-                        std::string name = "FM " + std::to_string(bestFreq).substr(0, 5);
-                        found_stations.push_back({{"freq", bestFreq}, {"name", name}});
+                } else {
+                    if (inCluster) {
+                        if (clusterSteps >= 2 && bestFreq > 0.0) {
+                            std::string name = "FM " + std::to_string(bestFreq).substr(0, 5);
+                            found_stations.push_back({{"freq", bestFreq}, {"name", name}});
+                        }
+                        inCluster    = false;
+                        bestRssi     = -999.0f;
+                        bestFreq     = 0.0;
+                        clusterSteps = 0;
                     }
-                    inCluster    = false;
-                    bestRssi     = -999.0f;
-                    bestFreq     = 0.0;
-                    clusterSteps = 0;
                 }
             }
-        }
 
-        // Flush final cluster
-        if (inCluster && clusterSteps >= 2 && bestFreq > 0.0) {
-            std::string name = "FM " + std::to_string(bestFreq).substr(0, 5);
-            found_stations.push_back({{"freq", bestFreq}, {"name", name}});
-        }
+            if (inCluster && clusterSteps >= 2 && bestFreq > 0.0) {
+                std::string name = "FM " + std::to_string(bestFreq).substr(0, 5);
+                found_stations.push_back({{"freq", bestFreq}, {"name", name}});
+            }
 
-        std::cout << "[Scanner] Complete. Found " << found_stations.size()
-                  << " stations." << std::endl;
+            std::cout << "[Scanner] Complete. Found " << found_stations.size()
+                      << " stations." << std::endl;
 
-        g_mode = DeviceMode::IDLE;
+            g_mode = DeviceMode::IDLE;
+            sendCtrlResponse(json({{"event", "scan_complete"}, {"stations", found_stations}}).dump());
+        }).detach();
 
-        return json({{"event", "scan_complete"}, {"stations", found_stations}}).dump();
+        return "";
     }
 
     std::cerr << "[CTRL] Unknown command: " << command << std::endl;
@@ -466,10 +456,6 @@ std::string handleCommand(SdrHandler* sdr, const json& cmd) {
 
 // =======================================================
 // TCP CONTROL SERVER THREAD
-// =======================================================
-// Accepts one client at a time on the CTRL port.
-// Reads newline-delimited JSON commands, dispatches them,
-// and sends back JSON event responses.
 // =======================================================
 void controlServerThread(SdrHandler* sdr) {
     socket_t srv = socket(AF_INET, SOCK_STREAM, 0);
@@ -495,9 +481,9 @@ void controlServerThread(SdrHandler* sdr) {
         socket_t client_fd = accept(srv, (struct sockaddr*)&client_addr, &client_len);
         if (client_fd < 0) continue;
 
+        g_ctrl_client_fd.store(client_fd, std::memory_order_release);
         std::cout << "[CTRL] Client connected." << std::endl;
 
-        // Line-buffered command reader
         std::string line_buf;
         char chunk[4096];
 
@@ -518,17 +504,16 @@ void controlServerThread(SdrHandler* sdr) {
                     std::string response = handleCommand(sdr, cmd);
 
                     if (!response.empty()) {
-                        response += "\n";
-                        send_compat(client_fd, response.c_str(), response.size(), MSG_NOSIGNAL);
+                        sendCtrlResponse(response);
                     }
                 } catch (const json::exception& e) {
                     std::cerr << "[CTRL] JSON parse error: " << e.what() << std::endl;
-                    std::string err = json({{"event","error"},{"msg","bad json"}}).dump() + "\n";
-                    send_compat(client_fd, err.c_str(), err.size(), MSG_NOSIGNAL);
+                    sendCtrlResponse(json({{"event","error"},{"msg","bad json"}}).dump());
                 }
             }
         }
 
+        g_ctrl_client_fd.store(static_cast<socket_t>(-1), std::memory_order_release);
         close_socket(client_fd);
         std::cout << "[CTRL] Client disconnected." << std::endl;
     }
@@ -540,7 +525,6 @@ void controlServerThread(SdrHandler* sdr) {
 // =======================================================
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
-    // Initialize Winsock
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::cerr << "[RELAY] WSAStartup failed." << std::endl;
@@ -556,7 +540,6 @@ int main(int argc, char* argv[]) {
     std::cout << "  Ctrl port : " << relay::CTRL_PORT << std::endl;
     std::cout << "==========================================" << std::endl;
 
-    // Initialize SDR hardware (native USB — full interrupt rate)
     SdrHandler sdr;
     if (!sdr.InitializeAPI()) {
         std::cerr << "[RELAY] SDR initialization failed." << std::endl;
@@ -569,11 +552,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << "[RELAY] SDR streaming. Launching TCP servers..." << std::endl;
 
-    // Launch TCP servers
     std::thread(dataAcceptThread).detach();
     std::thread(dataSenderThread).detach();
 
-    // Block on control server (main thread)
     controlServerThread(&sdr);
 
     sdr.ShutdownSDR();
