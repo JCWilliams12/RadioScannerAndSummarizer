@@ -756,11 +756,179 @@ void commandListener() {
 
 
 // =======================================================
+// MOCK MODE — No SDR hardware, full pipeline test
+// =======================================================
+// Activated by SDR_MODE=mock environment variable.
+// SCAN returns fake stations, RECORD sleeps then signals
+// completion (expects a pre-existing audio.wav), LIVE_LISTEN
+// streams a 440 Hz sine tone through Redis so the full
+// WebSocket → frontend audio path is exercised.
+// =======================================================
+
+static std::atomic<bool> g_mock_live_active(false);
+
+// Generate a 16kHz mono sine tone buffer at the given frequency
+static void fillSineTone(int16_t* buf, size_t num_samples, float freq_hz,
+                         float sample_rate, float& phase) {
+    const float phase_inc = 2.0f * M_PI * freq_hz / sample_rate;
+    for (size_t i = 0; i < num_samples; i++) {
+        buf[i] = static_cast<int16_t>(std::sin(phase) * 24000.0f);
+        phase += phase_inc;
+        if (phase > 2.0f * M_PI) phase -= 2.0f * M_PI;
+    }
+}
+
+// Streams sine tone PCM chunks to Redis live_audio at ~real-time rate
+static void mockLiveStreamThread() {
+    redisContext* rc = redisConnect("ag-redis", 6379);
+    if (!rc || rc->err) {
+        std::cerr << "[Mock Live] Redis connection failed!" << std::endl;
+        return;
+    }
+
+    const int CHUNK_SIZE = 1600;  // 100ms at 16kHz
+    int16_t buf[CHUNK_SIZE];
+    float phase = 0.0f;
+
+    std::cout << "[Mock Live] Streaming 440 Hz tone to WebSockets..." << std::endl;
+
+    while (g_mock_live_active.load(std::memory_order_relaxed)) {
+        fillSineTone(buf, CHUNK_SIZE, 440.0f, 16000.0f, phase);
+
+        std::string payload(reinterpret_cast<const char*>(buf), CHUNK_SIZE * sizeof(int16_t));
+        redisReply* r = (redisReply*)redisCommand(rc, "PUBLISH live_audio %b",
+                                                  payload.data(), payload.size());
+        if (r) freeReplyObject(r);
+
+        // Sleep 100ms to match real-time rate (1600 samples / 16000 Hz)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    std::cout << "[Mock Live] Stream stopped." << std::endl;
+    redisFree(rc);
+}
+
+void mockCommandListener() {
+    redisContext* c = redisConnect("ag-redis", 6379);
+    if (!c || c->err) {
+        std::cerr << "[Mock] Redis connection failed!" << std::endl;
+        return;
+    }
+
+    redisReply* reply = (redisReply*)redisCommand(c, "SUBSCRIBE sdr_commands");
+    if (reply) freeReplyObject(reply);
+
+    std::cout << "[Mock SDR] Listening for commands (no hardware)..." << std::endl;
+
+    while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
+        if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
+            auto json = crow::json::load(reply->element[2]->str);
+            if (!json) { freeReplyObject(reply); continue; }
+
+            std::string cmd = json["command"].s();
+
+            // ---- TUNE: log only ----
+            if (cmd == "TUNE") {
+                double freq = json.has("freq") ? json["freq"].d() : 0.0;
+                std::cout << "[Mock SDR] Tuned to " << freq << " MHz (simulated)" << std::endl;
+            }
+            // ---- SCAN: return fake stations after short delay ----
+            else if (cmd == "SCAN") {
+                std::cout << "[Mock SDR] Starting simulated scan..." << std::endl;
+
+                std::thread([]() {
+                    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+                    crow::json::wvalue msg;
+                    msg["event"] = "scan_complete";
+                    msg["stations"][0]["freq"] = 90.3;
+                    msg["stations"][0]["name"] = "WBHM 90.3";
+                    msg["stations"][1]["freq"] = 95.7;
+                    msg["stations"][1]["name"] = "FM 95.7";
+                    msg["stations"][2]["freq"] = 101.1;
+                    msg["stations"][2]["name"] = "FM 101.1";
+                    msg["stations"][3]["freq"] = 107.7;
+                    msg["stations"][3]["name"] = "FM 107.7";
+
+                    redisContext* pub = redisConnect("ag-redis", 6379);
+                    if (pub && !pub->err) {
+                        redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
+                        std::cout << "[Mock SDR] Scan complete. Sent 4 mock stations." << std::endl;
+                        redisFree(pub);
+                    }
+                }).detach();
+            }
+            // ---- RECORD: sleep 30s, signal completion (audio.wav already exists) ----
+            else if (cmd == "RECORD") {
+                double freq = json.has("freq") ? json["freq"].d() : 0.0;
+                std::cout << "[Mock SDR] Recording " << freq << " MHz (simulated 30s)..." << std::endl;
+
+                std::thread([freq]() {
+                    std::this_thread::sleep_for(std::chrono::seconds(30));
+
+                    crow::json::wvalue msg;
+                    msg["event"] = "record_complete";
+                    msg["freq"]  = freq;
+                    msg["file"]  = "/app/shared/audio/audio.wav";
+
+                    redisContext* pub = redisConnect("ag-redis", 6379);
+                    if (pub && !pub->err) {
+                        redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
+                        std::cout << "[Mock SDR] Record complete for " << freq << " MHz." << std::endl;
+                        redisFree(pub);
+                    }
+                }).detach();
+            }
+            // ---- LIVE_LISTEN: stream sine tone ----
+            else if (cmd == "LIVE_LISTEN") {
+                double freq = json.has("freq") ? json["freq"].d() : 0.0;
+                if (!g_mock_live_active.load(std::memory_order_relaxed)) {
+                    g_mock_live_active.store(true, std::memory_order_release);
+                    std::thread(mockLiveStreamThread).detach();
+                    std::cout << "[Mock SDR] Live listen started for " << freq << " MHz (440 Hz tone)" << std::endl;
+                }
+            }
+            // ---- STOP_LIVE ----
+            else if (cmd == "STOP_LIVE") {
+                g_mock_live_active.store(false, std::memory_order_release);
+                std::cout << "[Mock SDR] Live listen stopped." << std::endl;
+            }
+        }
+        if (reply) freeReplyObject(reply);
+    }
+    redisFree(c);
+}
+
+
+// =======================================================
 // MAIN
 // =======================================================
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
 
+    // Check mode: "mock" = no hardware, "live" (or unset) = real relay
+    const char* sdr_mode_env = std::getenv("SDR_MODE");
+    std::string sdr_mode = sdr_mode_env ? sdr_mode_env : "live";
+
+    // Connect to Redis (needed in both modes)
+    g_redis_pub = redisConnect("ag-redis", 6379);
+    if (!g_redis_pub || g_redis_pub->err) {
+        std::cerr << "[SDR-DAEMON] Redis connection failed!" << std::endl;
+        return 1;
+    }
+
+    if (sdr_mode == "mock") {
+        std::cout << "\n[SDR-DAEMON] ====== MOCK MODE (no hardware) ======" << std::endl;
+        std::cout << "  SCAN    → 4 fake stations after 3s delay" << std::endl;
+        std::cout << "  RECORD  → 30s wait, then record_complete" << std::endl;
+        std::cout << "  LIVE    → 440 Hz sine tone via WebSocket" << std::endl;
+        std::cout << "=================================================\n" << std::endl;
+
+        mockCommandListener();
+        return 0;
+    }
+
+    // ---- Live mode: connect to relay ----
     const char* relay_host_env = std::getenv("SDR_RELAY_HOST");
     const char* relay_data_env = std::getenv("SDR_RELAY_DATA_PORT");
     const char* relay_ctrl_env = std::getenv("SDR_RELAY_CTRL_PORT");
@@ -769,18 +937,13 @@ int main() {
     int relay_data_port    = relay_data_env ? std::atoi(relay_data_env) : 7373;
     int relay_ctrl_port    = relay_ctrl_env ? std::atoi(relay_ctrl_env) : 7374;
 
-    std::cout << "\n[SDR-DAEMON] ====== TCP-MODE (no USB) ======" << std::endl;
+    std::cout << "\n[SDR-DAEMON] ====== LIVE MODE (TCP relay) ======" << std::endl;
     std::cout << "  Relay Host : " << relay_host << std::endl;
     std::cout << "  Data Port  : " << relay_data_port << std::endl;
     std::cout << "  Ctrl Port  : " << relay_ctrl_port << std::endl;
-    std::cout << "=============================================\n" << std::endl;
+    std::cout << "================================================\n" << std::endl;
 
-    g_redis_pub = redisConnect("ag-redis", 6379);
-    if (!g_redis_pub || g_redis_pub->err) {
-        std::cerr << "[SDR-DAEMON] Redis connection failed!" << std::endl;
-        return 1;
-    }
-
+    // Start DSP threads
     std::thread demod_t(demodThread);
     {
         struct sched_param sp;

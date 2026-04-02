@@ -137,7 +137,7 @@ ensure_sdr_service() {
     done
 
     echo -e "  ${RED}[!!]${NC} Could not start SDRplay API service."
-    exit 1
+    return 1
 }
 
 # =============================================================================
@@ -168,7 +168,7 @@ build_relay() {
 
     if [[ ! -x "$RELAY_BIN" ]]; then
         echo -e "  ${RED}[!!]${NC} Build failed."
-        exit 1
+        return 1
     fi
 
     echo -e "  ${GREEN}[OK]${NC} Relay built: $RELAY_BIN"
@@ -229,7 +229,7 @@ start_relay() {
         echo -e "  ${RED}[!!]${NC} Relay exited. Last 15 lines:"
         tail -15 "$RELAY_LOG" 2>/dev/null || true
         rm -f "$RELAY_PID_FILE"
-        exit 1
+        return 1
     fi
     echo ""
 }
@@ -241,7 +241,9 @@ start_docker() {
         *)      export SDR_RELAY_HOST="${SDR_RELAY_HOST:-host.docker.internal}" ;;
     esac
 
-    echo -e "  ${YELLOW}[..]${NC} Starting Docker pipeline (SDR_RELAY_HOST=$SDR_RELAY_HOST)..."
+    export SDR_MODE="${SDR_MODE:-live}"
+
+    echo -e "  ${YELLOW}[..]${NC} Starting Docker pipeline (SDR_MODE=$SDR_MODE, SDR_RELAY_HOST=$SDR_RELAY_HOST)..."
     dc -f "$SCRIPT_DIR/docker-compose.yml" up --build -d
     echo -e "  ${GREEN}[OK]${NC} Docker containers starting in background."
     echo ""
@@ -373,26 +375,84 @@ main() {
     case "$cmd" in
         start|up)
             check_prereqs
-            ensure_sdr_service "$os"
-            build_relay
             install_frontend
-            start_relay
+
+            # Try to build and start the relay — fall back to mock on failure
+            SDR_MODE="live"
+
+            if ! build_relay 2>/dev/null; then
+                echo -e "  ${YELLOW}[!!]${NC} Relay build failed — switching to MOCK MODE."
+                echo -e "       No SDR hardware needed. All features work with simulated data."
+                echo ""
+                SDR_MODE="mock"
+            elif ! ensure_sdr_service "$os" 2>/dev/null; then
+                echo -e "  ${YELLOW}[!!]${NC} SDR service unavailable — switching to MOCK MODE."
+                echo ""
+                SDR_MODE="mock"
+            elif ! start_relay 2>/dev/null; then
+                echo -e "  ${YELLOW}[!!]${NC} Relay failed to start — switching to MOCK MODE."
+                echo -e "       Check that SDR hardware is connected."
+                echo ""
+                SDR_MODE="mock"
+            fi
+
+            export SDR_MODE
             start_docker "$os"
             start_frontend
 
             echo -e "  ${CYAN}==================================================${NC}"
             echo -e "    ${BOLD}AetherGuard is running!${NC}"
+            if [[ "$SDR_MODE" == "mock" ]]; then
+                echo -e "    MODE: ${YELLOW}MOCK${NC} — no SDR hardware"
+            else
+                echo -e "    MODE: ${GREEN}LIVE${NC} — SDR relay active"
+            fi
             echo ""
             echo -e "    Frontend:  Check log for dev server URL"
             echo -e "    API:       http://localhost:8080"
-            echo -e "    SDR Relay: localhost:7373 (data) / 7374 (ctrl)"
+            if [[ "$SDR_MODE" == "live" ]]; then
+                echo -e "    SDR Relay: localhost:7373 (data) / 7374 (ctrl)"
+            fi
             echo ""
             echo -e "    To stop:   ./start.sh stop"
             echo -e "  ${CYAN}==================================================${NC}"
             echo ""
-            echo -e "  ${CYAN}[i]${NC} Tailing relay log (Ctrl+C to detach — services keep running)..."
+
+            if [[ "$SDR_MODE" == "live" ]]; then
+                echo -e "  ${CYAN}[i]${NC} Tailing relay log (Ctrl+C to detach — services keep running)..."
+                echo ""
+                tail -f "$RELAY_LOG" 2>/dev/null || true
+            else
+                echo -e "  ${CYAN}[i]${NC} Following container logs (Ctrl+C to detach)..."
+                echo ""
+                dc -f "$SCRIPT_DIR/docker-compose.yml" logs -f 2>/dev/null || true
+            fi
+            ;;
+
+        mock)
+            check_prereqs
+            install_frontend
+
+            export SDR_MODE="mock"
+            echo -e "  ${GREEN}[OK]${NC} Starting in MOCK MODE — no SDR hardware needed."
             echo ""
-            tail -f "$RELAY_LOG" 2>/dev/null || true
+
+            start_docker "$os"
+            start_frontend
+
+            echo -e "  ${CYAN}==================================================${NC}"
+            echo -e "    ${BOLD}AetherGuard is running in MOCK MODE!${NC}"
+            echo ""
+            echo -e "    Frontend:  Check log for dev server URL"
+            echo -e "    API:       http://localhost:8080"
+            echo -e "    SDR:       Simulated — 440 Hz tone, fake stations"
+            echo ""
+            echo -e "    To stop:   ./start.sh stop"
+            echo -e "  ${CYAN}==================================================${NC}"
+            echo ""
+            echo -e "  ${CYAN}[i]${NC} Following container logs (Ctrl+C to detach)..."
+            echo ""
+            dc -f "$SCRIPT_DIR/docker-compose.yml" logs -f 2>/dev/null || true
             ;;
 
         stop|down)
@@ -436,10 +496,11 @@ main() {
             ;;
 
         *)
-            echo "  Usage: $0 {start|stop|relay|docker|frontend|build|status}"
+            echo "  Usage: $0 {start|stop|mock|relay|docker|frontend|build|status}"
             echo ""
-            echo "    start     Build relay, start relay + Docker + frontend"
+            echo "    start     Build relay, start relay + Docker + frontend (auto-fallback to mock)"
             echo "    stop      Stop everything"
+            echo "    mock      Start in mock mode (no SDR hardware needed)"
             echo "    relay     Build and start only the native relay"
             echo "    docker    Start only the Docker pipeline"
             echo "    frontend  Start only the frontend dev server"

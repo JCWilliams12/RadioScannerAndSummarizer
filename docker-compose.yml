@@ -52,6 +52,7 @@ services:
     volumes:
       - ./shared-data:/app/shared
     environment:
+      - SDR_MODE=${SDR_MODE:-live}
       - SDR_RELAY_HOST=${SDR_RELAY_HOST:-host.docker.internal}
       - SDR_RELAY_DATA_PORT=${SDR_RELAY_DATA_PORT:-7373}
       - SDR_RELAY_CTRL_PORT=${SDR_RELAY_CTRL_PORT:-7374}

@@ -412,8 +412,8 @@ function App() {
     };
   }, [showPlaybackMenu, selectedLog]);
 
-  // THE 3-STEP SCAN HANDLER (Record -> Transcribe -> Summarize)
-// --- NEW: Status WebSocket Listener ---
+  // THE ASYNC PIPELINE: WebSocket listener drives transcription + summarization
+  // handleScan only kicks off the recording. This listener handles the rest.
   useEffect(() => {
     const statusWs = new WebSocket(`ws://${window.location.host}/ws/status`);
     
@@ -422,9 +422,11 @@ function App() {
       const freq = data.freq;
 
       if (data.event === "record_complete") {
+        // Recording finished → kick off transcription
+        setScanProgress(50);
+        setScanStatus("AI: Transcribing audio...");
         updateJob(freq, { summary: "AI: Processing transcription..." });
         
-        // Trigger Transcribe Request
         fetch(useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -432,12 +434,14 @@ function App() {
         });
       } 
       else if (data.event === "transcription_complete") {
+        // Transcription finished → show text immediately, kick off summary
+        setScanProgress(75);
+        setScanStatus("AI: Generating summary...");
         updateJob(freq, { 
           rawText: data.text,
           summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
         });
 
-        // Trigger Summarize Request
         fetch(useOpenAI ? '/api/summarize/openai' : '/api/summarize/local', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -445,10 +449,19 @@ function App() {
         });
       }
       else if (data.event === "summary_complete") {
+        // Summary finished → show it, then dismiss the loading bar
+        setScanProgress(100);
+        setScanStatus("Scan complete!");
         updateJob(freq, { 
           status: "complete",
           summary: data.summary 
         });
+
+        // Brief pause so "100% / Scan complete!" is visible, then dismiss
+        setTimeout(() => {
+          setIsScanning(false);
+          setScanProgress(0);
+        }, 1200);
       }
     };
 
@@ -456,12 +469,11 @@ function App() {
   }, [useOpenAI]);
 
 
-  // THE 3-STEP SCAN HANDLER (Refactored for Async WebSockets)
+  // SCAN HANDLER: kicks off recording only. The WebSocket listener above
+  // drives transcription → summarization → completion automatically.
   const handleScan = async () => {
     if (!selectedStation) return;
     const targetFreq = selectedStation.freq;
-    const transcribeRoute = useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local';
-    const summarizeRoute = useOpenAI ? '/api/summarize/openai' : '/api/summarize/local';
 
     setIsScanning(true);
     setScanProgress(5);
@@ -487,83 +499,36 @@ function App() {
       try {
         recordData = await recordRes.json();
       } catch {
-        throw new Error(`Record endpoint returned non-JSON (status: ${recordRes.status}). Check server console.`);
+        throw new Error(`Record endpoint returned non-JSON (status: ${recordRes.status}).`);
       }
 
       if (!recordRes.ok || recordData?.status !== "recording_started") {
-        throw new Error(`Recording failed. Status: ${recordRes.status}, Body: ${JSON.stringify(recordData)}`);
+        throw new Error(`Recording failed. Status: ${recordRes.status}`);
       }
 
-      updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
-
-      //Animate progress
+      // Animate progress bar during the 30-second recording
       const recordingStart = Date.now();
-      const recordingDuration = 31000
+      const recordingDuration = 31000;
       const progressInterval = setInterval(() => {
         const elapsed = Date.now() - recordingStart;
-      const ratio = Math.min(elapsed / recordingDuration, 1);
-      const currentProgress = Math.round(10 + ratio * 35);
-      setScanProgress(currentProgress);
+        const ratio = Math.min(elapsed / recordingDuration, 1);
+        const currentProgress = Math.round(10 + ratio * 35); // 10% → 45%
+        setScanProgress(currentProgress);
 
-      const secondsLeft = Math.max(0, Math.ceil((recordingDuration - elapsed) / 1000));
-      setScanStatus(`Hardware: Recording in progress... (${secondsLeft}s remaining)`);
+        const secondsLeft = Math.max(0, Math.ceil((recordingDuration - elapsed) / 1000));
+        setScanStatus(`Hardware: Recording in progress... (${secondsLeft}s remaining)`);
 
-      if (ratio >= 1) clearInterval(progressInterval);}, 500);
+        if (ratio >= 1) clearInterval(progressInterval);
+      }, 500);
 
       await new Promise(resolve => setTimeout(resolve, recordingDuration));
       clearInterval(progressInterval);
 
-      //Transcribe
-
-      setScanProgress(50);
-      setScanStatus("Transcribing audio")
-      updateJob(targetFreq, { summary: "AI: Processing transcription...",});
-
-
-      const transcribeRes = await fetch(transcribeRoute, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ freq: parseFloat(targetFreq) }),
-      });
-
-      if (!transcribeRes.ok) throw new Error(`Transcription failed (${transcribeRes.status})`);
-      const transcribeData = await transcribeRes.json();
-      
-      const rawText = transcribeData.transcription;
-      updateJob(targetFreq, { 
-        rawText: rawText,
-        summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
-      });
-
-      //summarize
-      setScanProgress(75);
-      setScanStatus("Generating summary...");
-
-      const summaryRes = await fetch(summarizeRoute, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: rawText }),
-      });
-
-      if (!summaryRes.ok) throw new Error(`Summarization failed (${summaryRes.status})`);
-      const summaryData = await summaryRes.json();
-
-            // Finalize
-      setScanProgress(95);
-      setScanStatus("Finalizing scan...");
-      
-      updateJob(targetFreq, { 
-        status: "complete",
-        summary: summaryData.summary 
-      });
-
-      await new Promise(r => setTimeout(r, 400));
-      
-      setScanProgress(100);
-      setScanStatus("Scan complete");
-
-      await new Promise(r => setTimeout(r, 800));
-      setIsScanning(false);
+      // Recording timer done — the WebSocket listener will receive
+      // record_complete from the daemon and drive the AI pipeline.
+      // Keep the loading bar visible while we wait.
+      setScanProgress(48);
+      setScanStatus("Waiting for AI pipeline...");
 
     } catch (error) {
       console.error(`Scan error on ${targetFreq}:`, error);
@@ -574,8 +539,6 @@ function App() {
       });
       setScanStatus(`Error: ${error.message}`);
       setScanProgress(0);
- 
-      // Keep the error visible briefly before clearing
       await new Promise(r => setTimeout(r, 2000));
       setIsScanning(false);
     }
@@ -926,26 +889,22 @@ function App() {
             <div className="data-box">
               <h3>Transmission Summary</h3>
               <div className="summary-content">
-                {/* Show progress bar when scanning, normal content otherwise */}
-                {isScanning ? (
-                  <ScanProgress status={scanStatus} progress={scanProgress} />
-                ) : (
-                  <>
-                    <p className="summary-text">
-                      {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
-                    </p>
-                    <hr style={{ borderColor: '#333', margin: '10px 0' }} />
-                    
-                    <p className="summary-text"><strong>AI Summary:</strong> {displaySummary}</p>
+                {/* Progress bar shows on top during scanning, results always visible below */}
+                {isScanning && <ScanProgress status={scanStatus} progress={scanProgress} />}
+                
+                <p className="summary-text">
+                  {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
+                </p>
+                <hr style={{ borderColor: '#333', margin: '10px 0' }} />
+                
+                <p className="summary-text"><strong>AI Summary:</strong> {displaySummary}</p>
 
-                    {displayRawText && (
-                      <>
-                        <br/>
-                        <p className="summary-text" style={{ fontSize: "0.85em", color: "#bbb" }}>
-                          <em>Raw Text: {displayRawText}</em>
-                        </p>
-                      </>
-                    )}
+                {displayRawText && (
+                  <>
+                    <br/>
+                    <p className="summary-text" style={{ fontSize: "0.85em", color: "#bbb" }}>
+                      <em>Raw Text: {displayRawText}</em>
+                    </p>
                   </>
                 )}
               </div>
@@ -958,7 +917,7 @@ function App() {
                     color: 'white' 
                   }}
                   onClick={() => setIsListeningLive(!isListeningLive)} 
-                  disabled={!selectedStation || isScanning}
+                  disabled={!selectedStation}
                 >
                   {isListeningLive ? "Stop Live Audio" : "Listen Live"}
                 </button>
@@ -974,7 +933,7 @@ function App() {
                 <button 
                   className="sub-btn save-btn" 
                   onClick={handleSave} 
-                  disabled={!selectedStation || isScanning}
+                  disabled={!selectedStation || isScanning || currentJob?.status !== 'complete'}
                 >
                   Save
                 </button>

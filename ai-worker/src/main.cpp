@@ -39,7 +39,7 @@ while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
             if (cmd == "TRANSCRIBE_LOCAL") {
                 std::cout << "[AI Worker] Starting Local Whisper..." << std::endl;
                 WhisperTest transcriber("/app/shared/models/ggml-base.en.bin");
-                std::string text = transcriber.transcribe("/app/shared/audio/dummy.wav");
+                std::string text = transcriber.transcribe("/app/shared/audio/audio.wav");
                 std::cout << "[AI Worker] Local Whisper Output: " << text << std::endl;
                 
                 crow::json::wvalue msg; 
@@ -57,7 +57,7 @@ while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
             }
             else if (cmd == "TRANSCRIBE_OPENAI") {
                 std::cout << "[AI Worker] Sending audio to OpenAI API..." << std::endl;
-                std::string text = transcribeAudio("/app/shared/audio/dummy.wav", getEnvVar("OPENAI_API_KEY"));
+                std::string text = transcribeAudio("/app/shared/audio/audio.wav", getEnvVar("OPENAI_API_KEY"));
                 std::cout << "[AI Worker] OpenAI API Response: " << text << std::endl;
                 
                 crow::json::wvalue msg; 
