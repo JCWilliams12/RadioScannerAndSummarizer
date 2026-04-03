@@ -2,8 +2,6 @@
 #include <hiredis/hiredis.h>
 #include <cstdlib>
 #include "crow.h"
-
-// Include your existing headers
 #include "ollamatest.hpp" 
 #include "whispertinytest.hpp"
 #include "openai.hpp"
@@ -33,7 +31,6 @@ while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
             std::string cmd = json["command"].s();
             double targetFreq = json["freq"].d();
 
-            // ---> THE NEW HEARTBEAT LOG <---
             std::cout << "\n[AI Worker] Received command: " << cmd << " for " << targetFreq << " MHz" << std::endl;
 
             if (cmd == "TRANSCRIBE_LOCAL") {

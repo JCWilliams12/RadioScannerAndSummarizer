@@ -38,28 +38,28 @@ WhisperTest::~WhisperTest() {
 std::string WhisperTest::transcribe(const std::string& wav_path) {
     if (!ctx) return "Error: Whisper context not initialized.";
 
-    std::vector<float> pcmf32; // Mono data
-    std::vector<std::vector<float>> pcmf32s; // Stereo data (unused here but required by helper)
+    std::vector<float> pcmf32;
+    std::vector<std::vector<float>> pcmf32s; 
 
-    // 1. Load WAV file
+    //Load WAV file
     if (!read_wav(wav_path, pcmf32, pcmf32s, false)) {
         return "Error: Failed to read WAV file '" + wav_path + "'";
     }
 
-    // 2. Configure full parameters
+    //Configure full parameters
     whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wparams.print_special = false;
     wparams.print_progress = false;
     wparams.print_realtime = false;
     wparams.print_timestamps = false;
-    wparams.language = "en"; // Set language to English
+    wparams.language = "en"; 
 
-    // 3. Run the inference
+    //Run the inference
     if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
         return "Error: failed to process audio";
     }
 
-    // 4. Extract text segments
+    //Extract text segments
     std::string result = "";
     const int n_segments = whisper_full_n_segments(ctx);
     for (int i = 0; i < n_segments; ++i) {

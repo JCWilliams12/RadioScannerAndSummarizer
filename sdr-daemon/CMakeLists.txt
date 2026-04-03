@@ -11,11 +11,6 @@ include_directories(src/sdr)
 include_directories(src/iqtowav)
 include_directories(/usr/local/include)
 
-# =============================================================================
-# MODIFIED: SDRplay API library removed.  USB hardware access now lives in
-# the native sdr-relay host application.  This container is pure DSP + TCP.
-# =============================================================================
-
 # Find Source Files — exclude sdr_handler.cpp (moved to sdr-relay)
 file(GLOB_RECURSE SDR_SOURCES "src/*.cpp")
 list(FILTER SDR_SOURCES EXCLUDE REGEX ".*sdr_handler\\.cpp$")

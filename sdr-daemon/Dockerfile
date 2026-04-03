@@ -1,10 +1,3 @@
-# =============================================================================
-# sdr-daemon/Dockerfile — Pure DSP + audio pipeline (no USB hardware access)
-# =============================================================================
-# MODIFIED: All SDRplay API and USB dependencies removed.  IQ samples now
-# arrive over TCP from the native sdr-relay host application.
-# =============================================================================
-
 FROM aetherguard-base:latest
 WORKDIR /app/sdr-daemon
 

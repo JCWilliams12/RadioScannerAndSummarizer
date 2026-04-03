@@ -10,27 +10,17 @@
 extern "C" {
     #include "sqlite3.h"
 }
-// Search it by any of the keys, and as for as date goes, more recent than or older than 
 
-// 1. Thread-safety: Global mutex to prevent "Database is locked" errors
-//    since we open/close the file every single time.
 static std::mutex db_mtx;
 
-// Assuming RadioLog is defined in dbcorefunctions.hpp or similar:
-// struct RadioLog { double freq; long long time; std::string location; std::string text; std::string summary; };
-
-// ==========================================
-// Filter by Frequency
-// ==========================================
 std::vector<RadioLog> filterByFrequency(double freq) {
-    std::lock_guard<std::mutex> lock(db_mtx); // Locks the DB just for this request
+    std::lock_guard<std::mutex> lock(db_mtx);
     sqlite3 *db;
     sqlite3_stmt *stmt;
     std::vector<RadioLog> results;
 
     if (sqlite3_open(DB_NAME, &db) != SQLITE_OK) return results;
 
-    // 2. Float precision: using a small +/- 0.005 window (5 kHz)
     const char *sql = "SELECT freq, time, location, rawT, summary, channelName FROM RadioLogs WHERE freq BETWEEN ? AND ? ORDER BY time DESC;";
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
@@ -53,9 +43,6 @@ std::vector<RadioLog> filterByFrequency(double freq) {
     return results;
 }
 
-// ==========================================
-// Filter by Location
-// ==========================================
 std::vector<RadioLog> filterByLocation(const std::string& loc) {
     std::lock_guard<std::mutex> lock(db_mtx);
     sqlite3 *db;
@@ -86,9 +73,6 @@ std::vector<RadioLog> filterByLocation(const std::string& loc) {
     return results;
 }
 
-// ==========================================
-// Filter by Time
-// ==========================================
 std::vector<RadioLog> filterByTime(long long unixTime) {
     std::lock_guard<std::mutex> lock(db_mtx);
     sqlite3 *db;
@@ -97,12 +81,11 @@ std::vector<RadioLog> filterByTime(long long unixTime) {
 
     if (sqlite3_open(DB_NAME, &db) != SQLITE_OK) return results;
 
-    // CORRECTED: Column names and count now match your schema
     const char *sql = "SELECT freq, time, location, rawT, summary, channelName FROM RadioLogs WHERE time >= ? AND time <= ? ORDER BY time ASC;";
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, unixTime);
-        sqlite3_bind_int64(stmt, 2, unixTime + 59); // 1-minute window
+        sqlite3_bind_int64(stmt, 2, unixTime + 59);
         
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             RadioLog log;
@@ -122,9 +105,6 @@ std::vector<RadioLog> filterByTime(long long unixTime) {
     return results;
 }
 
-// ==========================================
-// Filter by Channel Name
-// ==========================================
 std::vector<RadioLog> filterByChannelName(const std::string& channel) {
     std::lock_guard<std::mutex> lock(db_mtx);
     sqlite3 *db;
@@ -133,7 +113,6 @@ std::vector<RadioLog> filterByChannelName(const std::string& channel) {
 
     if (sqlite3_open(DB_NAME, &db) != SQLITE_OK) return results;
 
-    // We use LIKE to allow for partial matches (e.g., "Police" matches "Bham Police 1")
     const char *sql = "SELECT freq, time, location, rawT, summary, channelName "
                       "FROM RadioLogs WHERE channelName LIKE ? ORDER BY time DESC;";
 

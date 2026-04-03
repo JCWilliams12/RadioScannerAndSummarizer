@@ -17,7 +17,6 @@ std::string GenerateSummary(std::string transcript) {
             llama_backend_init();
             
             llama_model_params model_params = llama_model_default_params();
-            // UPDATED: llama_load_model_from_file is now llama_model_load_from_file
             g_model = llama_model_load_from_file("/app/shared/models/Phi-3-mini-4k-instruct-q4.gguf", model_params);            
             if (!g_model) {
                 return "[Error] Failed to load Phi-3 model.";
@@ -26,7 +25,6 @@ std::string GenerateSummary(std::string transcript) {
 
         llama_context_params ctx_params = llama_context_default_params();
         ctx_params.n_ctx = 2048; 
-        // UPDATED: llama_new_context_with_model is now llama_init_from_model
         llama_context* ctx = llama_init_from_model(g_model, ctx_params);
 
         const llama_vocab* vocab = llama_model_get_vocab(g_model);
@@ -83,7 +81,6 @@ std::string GenerateSummary(std::string transcript) {
                 }
             }
 
-            // UPDATED: llama_token_is_eog is now llama_vocab_is_eog
             if (llama_vocab_is_eog(vocab, new_token_id)) {
                 break;
             }

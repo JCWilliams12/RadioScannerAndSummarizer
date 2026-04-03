@@ -5,12 +5,6 @@ set(CMAKE_CXX_STANDARD 17)
 
 find_package(Threads REQUIRED)
 
-# =============================================================================
-# SDRplay API — must be installed natively on the host.
-#   Linux:   Run SDRplay_RSP_API-Linux-3.15.2.run
-#   macOS:   Install SDRplay API from sdrplay.com
-#   Windows: Install SDRplay API + use vcpkg or set paths manually
-# =============================================================================
 find_library(SDRPLAY_LIB
     NAMES sdrplay_api
     PATHS /usr/local/lib
@@ -36,9 +30,6 @@ find_path(SDRPLAY_INCLUDE
           "C:/Program Files/SDRplay/API/inc"
 )
 
-# =============================================================================
-# nlohmann/json — lightweight header-only JSON for the control protocol
-# =============================================================================
 include(FetchContent)
 FetchContent_Declare(
     json
@@ -46,9 +37,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
-# =============================================================================
-# Build the relay
-# =============================================================================
 add_executable(sdr_relay
     main.cpp
     sdr_handler.cpp
