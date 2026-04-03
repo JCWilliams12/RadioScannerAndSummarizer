@@ -135,7 +135,7 @@ const HeaderLogo = ({ isHovered, onHoverStart, onHoverEnd }) => {
             key={i}
             custom={i}
             initial="initial"
-            animate={"active"}
+            animate={isHovered ? "active" : "initial"}
             variants={arcVariants}
             /* Quarter-circle arc: starts at (r, 0) and sweeps to (0, r) */
             d={`M ${arc.r} 0 A ${arc.r} ${arc.r} 0 0 1 0 ${arc.r}`}
@@ -314,7 +314,7 @@ function App() {
     }
   };
 
-  // LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
+// LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
   useEffect(() => {
     if (isListeningLive && selectedStation) {
       // FIX: Force the AudioContext to match the backend 16kHz output
@@ -412,7 +412,8 @@ function App() {
     };
   }, [showPlaybackMenu, selectedLog]);
 
-  // THE ASYNC PIPELINE: WebSocket listener drives transcription + summarization
+  // THE 3-STEP SCAN HANDLER (Record -> Transcribe -> Summarize)
+// THE ASYNC PIPELINE: WebSocket listener drives transcription + summarization.
   // handleScan only kicks off the recording. This listener handles the rest.
   useEffect(() => {
     const statusWs = new WebSocket(`ws://${window.location.host}/ws/status`);
@@ -457,7 +458,7 @@ function App() {
           summary: data.summary 
         });
 
-        // Brief pause so "100% / Scan complete!" is visible, then dismiss
+        // Brief pause so user sees "100% / Scan complete!", then dismiss
         setTimeout(() => {
           setIsScanning(false);
           setScanProgress(0);
@@ -469,7 +470,7 @@ function App() {
   }, [useOpenAI]);
 
 
-// SCAN HANDLER: kicks off recording only. The WebSocket listener above
+  // SCAN HANDLER: kicks off recording only. The WebSocket listener above
   // drives transcription → summarization → completion automatically.
   const handleScan = async () => {
     if (!selectedStation) return;
@@ -506,15 +507,13 @@ function App() {
         throw new Error(`Recording failed. Status: ${recordRes.status}`);
       }
 
-      updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
-
-      // Animate progress
+      // Animate progress bar during the 30-second recording
       const recordingStart = Date.now();
       const recordingDuration = 31000;
       const progressInterval = setInterval(() => {
         const elapsed = Date.now() - recordingStart;
         const ratio = Math.min(elapsed / recordingDuration, 1);
-        const currentProgress = Math.round(10 + ratio * 35);
+        const currentProgress = Math.round(10 + ratio * 35); // 10% → 45%
         setScanProgress(currentProgress);
 
         const secondsLeft = Math.max(0, Math.ceil((recordingDuration - elapsed) / 1000));
@@ -523,10 +522,13 @@ function App() {
         if (ratio >= 1) clearInterval(progressInterval);
       }, 500);
 
-      // Wait for the 31 seconds. 
-      // (After this finishes, the WebSocket listener handles the rest automatically!)
       await new Promise(resolve => setTimeout(resolve, recordingDuration));
       clearInterval(progressInterval);
+
+      // Recording timer done — WebSocket listener takes over from here.
+      // Keep the loading bar visible while waiting for record_complete event.
+      setScanProgress(48);
+      setScanStatus("Waiting for AI pipeline...");
 
     } catch (error) {
       console.error(`Scan error on ${targetFreq}:`, error);
@@ -537,8 +539,6 @@ function App() {
       });
       setScanStatus(`Error: ${error.message}`);
       setScanProgress(0);
- 
-      // Keep the error visible briefly before clearing
       await new Promise(r => setTimeout(r, 2000));
       setIsScanning(false);
     }
@@ -846,7 +846,7 @@ function App() {
               <button 
                 className="sub-btn" 
                 onClick={handleWidebandSweep}
-                disabled={isScanningBand}
+                disabled={isScanningBand || isScanning}
                 style={{ 
                   width: '100%',      
                   marginBottom: '15px', 
@@ -867,11 +867,12 @@ function App() {
               </button>
 
               {/* Zeroed out default browser list spacing and made it scrollable */}
-              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none' }}>
+              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none', opacity: isScanning ? 0.5 : 1, pointerEvents: isScanning ? 'none' : 'auto' }}>
                 {stations.map(s => (
                   <li 
                     key={s.id}
                     onClick={() => {
+                      if (isScanning) return;
                       setSelectedStation(s);
                       setIsListeningLive(false);
                     }}
@@ -946,7 +947,7 @@ function App() {
         </div>
       )}
     </div>
-  );
+  )
 }
  
 export default App
