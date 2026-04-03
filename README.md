@@ -1,6 +1,35 @@
 # RadioScannerAndSummarizer
+# AuetherGuard
 
 -=-=-=-=-=-=-TO RUN-=-=-=-=-=-=-=-=-=-
+widnows:
+./start.bat
+or
+./start.bat mock
+!!! USE "./start.bat stop" TO CLOSE CLEANLY !!!
+
+
+Mac/Linux:
+./start
+(can boot into mock mode automatically upon not detcting SDR unit)
+!!! USE "./start.sh stop" TO CLOSE CLEANY !!!
+
+
+for additional boot commands check out the start.bat and start.sh files
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+
+
+
+
+
+---------dev stuff might be important later----------
+|||||||||||||||||||||||||||||||||||||||||||||||||||||
+vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+
+( ͡° ͜ʖ ͡°)
+:^)
+
 paste the following in the terminal:
 Windows:
     cmake --build build
@@ -16,17 +45,13 @@ Linux:
         cmake --build build
         ./build/server
 
--=-=-=-=-=-=-For Crow.h Just in case-=-=-=-=-=-=-=-=-=-
-wget https://github.com/CrowCpp/Crow/releases/download/v1.2.0/crow_all.h -O crow.h
-sudo apt-get install -y libboost-all-dev
-
-
 
 -=-=-=-=-=-=-Run Front End-=-=-=-=-=-=-=-=-=-
 Paste the following into terminal: 
 cd client
 npm install
 npm run dev
+
 
 docker-compose up --build
 usbipd attach --wsl --busid <BUSID>

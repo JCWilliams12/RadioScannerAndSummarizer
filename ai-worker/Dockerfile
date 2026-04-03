@@ -29,6 +29,7 @@ RUN g++ -O3 src/main.cpp src/ollamatest/ollamatest.cpp src/whispertinytest/whisp
 
 # Copy and enable the entrypoint that auto-downloads models on first run
 COPY ai-worker/entrypoint.sh /app/ai-worker/entrypoint.sh
+RUN sed -i 's/\r$//' /app/ai-worker/entrypoint.sh
 RUN chmod +x /app/ai-worker/entrypoint.sh
 
 CMD ["./entrypoint.sh"]
