@@ -212,7 +212,6 @@ function App() {
   const audioCtxRef = useRef(null);
   const wsRef = useRef(null);
 
-  // --- FIX: Scheduler ref to queue audio chunks back-to-back ---
   // Without this, all chunks fire at "now" causing rhythmic gaps/stuttering
   const nextPlayTimeRef = useRef(0);
 
@@ -317,7 +316,6 @@ function App() {
 // LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
   useEffect(() => {
     if (isListeningLive && selectedStation) {
-      // FIX: Force the AudioContext to match the backend 16kHz output
       audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({
         sampleRate: 16000
       });
@@ -353,7 +351,6 @@ function App() {
         nextPlayTimeRef.current += audioBuffer.duration;
       };
 
-      // FIX: Trigger the LIVE_LISTEN command on the backend explicitly
       fetch('/api/scan/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -371,7 +368,6 @@ function App() {
         audioCtxRef.current = null;
       }
       
-      // FIX: Ensure backend terminates the live listen stream when off
       fetch('/api/scan/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
