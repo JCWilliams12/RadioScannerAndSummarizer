@@ -1,13 +1,10 @@
-// =============================================================================
 // sdr-relay/sdr_handler.cpp — SDRplay USB hardware driver
-// =============================================================================
 // This file is structurally identical to the original sdr-daemon version.
 // The only difference is WHERE it lives and WHO provides broadcastAudio():
 //   - Original:  sdr-daemon container → broadcastAudio() feeds DSP ring buffer
 //   - Now:       sdr-relay native app → broadcastAudio() feeds TCP ring buffer
 //
 // The extern linkage to broadcastAudio() is resolved by the relay's main.cpp.
-// =============================================================================
 
 #include "sdr_handler.hpp"
 #include <cmath>

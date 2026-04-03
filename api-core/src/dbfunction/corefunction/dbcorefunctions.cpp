@@ -10,7 +10,6 @@ extern "C" {
 
 const char* DB_NAME = "/app/shared/db/app.db";
 
-// -=- 1. CREATE TABLE -=-
 // Creates the table only if it doesn't exist yet.
 bool createTable() {
     sqlite3 *db;
@@ -24,7 +23,7 @@ bool createTable() {
         return false;
     }
 
-    // Updated Schema: freq, time, location, rawT, summary, channelName
+    // Schema: freq, time, location, rawT, summary, channelName
     // Composite Primary Key: freq, time, location
     const char *sql = 
         "CREATE TABLE IF NOT EXISTS RadioLogs (" \
@@ -49,7 +48,6 @@ bool createTable() {
     return true;
 }
 
-// -=- 2. INSERT ROW -=-
 // Uses "INSERT OR REPLACE" to update existing logs that match the primary key
 void insertLog(double freq, long long time, std::string location, std::string rawT, std::string summary, std::string channelName) {
     sqlite3 *db;
@@ -73,7 +71,6 @@ void insertLog(double freq, long long time, std::string location, std::string ra
         return;
     }
 
-    // Bind values to the ? placeholders (Indices start at 1)
     sqlite3_bind_double(stmt, 1, freq);
     sqlite3_bind_int64(stmt, 2, time);
     sqlite3_bind_text(stmt, 3, location.c_str(), -1, SQLITE_STATIC);
@@ -90,12 +87,10 @@ void insertLog(double freq, long long time, std::string location, std::string ra
         std::cout << "Log inserted successfully: " << channelName << " (" << freq << "MHz) at " << time << std::endl;
     }
 
-    // Clean up
     sqlite3_finalize(stmt);
     sqlite3_close(db);
 }
 
-// -=- 3. QUERY ALL -=-
 std::vector<RadioLog> getAllLogs() {
     std::vector<RadioLog> logs;
     sqlite3 *db;
@@ -145,7 +140,6 @@ std::vector<RadioLog> getAllLogs() {
     return logs;
 }
 
-// -=- 4. REMOVE ROW -=-
 int removeLog(double freq, long long time, std::string location) {
     sqlite3 *db;
     sqlite3_stmt *stmt;
@@ -157,7 +151,6 @@ int removeLog(double freq, long long time, std::string location) {
         return 0;
     }
 
-    // Using ABS for safe floating-point comparison instead of ROUND
     const char *sql = "DELETE FROM RadioLogs WHERE ABS(freq - ?) < 0.005 AND time = ? AND location = ?;";
         
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
@@ -170,11 +163,10 @@ int removeLog(double freq, long long time, std::string location) {
 
     sqlite3_bind_double(stmt, 1, freq);
     sqlite3_bind_int64(stmt, 2, time);
-    // CRITICAL FIX: Use SQLITE_TRANSIENT so SQLite safely copies the string
     sqlite3_bind_text(stmt, 3, location.c_str(), -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(stmt);
-    int changes = sqlite3_changes(db); // Check how many rows were actually deleted
+    int changes = sqlite3_changes(db); 
 
     if (rc != SQLITE_DONE) {
         fprintf(stderr, "Delete failed: %s\n", sqlite3_errmsg(db));
@@ -191,7 +183,6 @@ int removeLog(double freq, long long time, std::string location) {
     return changes > 0 ? 1 : 0; 
 }
 
-// -=- 5. OPEN DATABASE CHECK -=-
 void openDatabase(){
     sqlite3 *db;
     char *zErrMsg = 0;

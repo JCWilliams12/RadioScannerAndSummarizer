@@ -1,6 +1,4 @@
-// =============================================================================
 // sdr-relay/main.cpp — Native host SDR relay server
-// =============================================================================
 // This is the thin native application that runs directly on the host OS.
 // It opens the SDR via USB (full interrupt rate, no WSL2 bottleneck) and
 // exposes two TCP ports:
@@ -10,7 +8,6 @@
 //
 // The entire Docker pipeline (sdr-daemon, api-core, ai-worker, frontend)
 // connects here for IQ data and hardware control.
-// =============================================================================
 
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
@@ -30,9 +27,7 @@
 #include <sstream>
 #include <algorithm>
 
-// =============================================================================
 // Cross-platform networking
-// =============================================================================
 #ifdef _WIN32
     #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
@@ -97,9 +92,6 @@
 using json = nlohmann::json;
 
 
-// =======================================================
-// SHARED STATE (externs resolved by sdr_handler.cpp)
-// =======================================================
 enum class DeviceMode { IDLE, SCANNING, RECORDING, LIVE_LISTEN };
 std::atomic<DeviceMode> g_mode(DeviceMode::IDLE);
 std::atomic<bool>       g_stream_gap(false);
@@ -123,9 +115,6 @@ static void sendCtrlResponse(const std::string& json_str) {
 }
 
 
-// =======================================================
-// RELAY IQ RING BUFFER (USB callback -> TCP sender)
-// =======================================================
 struct RelaySlot {
     std::array<int16_t, relay::SLOT_SAMPLES * 2> data;
     uint32_t num_samples;
@@ -139,9 +128,6 @@ static std::condition_variable g_relay_cv;
 static std::mutex              g_relay_mtx;
 
 
-// =======================================================
-// broadcastAudio() — called by sdr_handler.cpp's USB callback
-// =======================================================
 void broadcastAudio(const std::vector<int16_t>& iqBuffer) {
     if (++g_heartbeat_count % 100 == 0) {
         g_heartbeat_cv.notify_all();
@@ -167,9 +153,6 @@ void broadcastAudio(const std::vector<int16_t>& iqBuffer) {
 }
 
 
-// =======================================================
-// TCP DATA CLIENT TRACKING
-// =======================================================
 static std::mutex         g_clients_mtx;
 static std::vector<socket_t> g_data_clients;
 
@@ -191,9 +174,6 @@ static void removeDataClient(socket_t fd) {
 }
 
 
-// =======================================================
-// TCP DATA SENDER THREAD
-// =======================================================
 void dataSenderThread() {
     const size_t max_frame = 8 + (relay::SLOT_SAMPLES * 2 * sizeof(int16_t));
     std::vector<uint8_t> frame(max_frame);
@@ -239,9 +219,6 @@ void dataSenderThread() {
 }
 
 
-// =======================================================
-// TCP DATA ACCEPT THREAD
-// =======================================================
 void dataAcceptThread() {
     socket_t srv = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
@@ -276,9 +253,6 @@ void dataAcceptThread() {
 }
 
 
-// =======================================================
-// HARDWARE HELPERS
-// =======================================================
 extern std::atomic<float> g_fast_power;
 
 void setBandwidth(SdrHandler* sdr, sdrplay_api_Bw_MHzT bw, sdrplay_api_If_kHzT ifMode) {
@@ -319,9 +293,7 @@ float getValidatedPower(SdrHandler* sdr) {
 }
 
 
-// =======================================================
-// CONTROL COMMAND DISPATCH
-// =======================================================
+
 std::string handleCommand(SdrHandler* sdr, const json& cmd) {
     std::string command = cmd.value("command", "");
 
@@ -334,10 +306,6 @@ std::string handleCommand(SdrHandler* sdr, const json& cmd) {
     }
 
     // ---- CONFIGURE: set BW, IF mode, AGC, LNA, tune ----
-    // FIX: This MUST be synchronous.  The SDRplay API is not thread-safe —
-    // if we spawn a thread here, it can race with the USB callback thread
-    // or a concurrent SCAN thread calling sdrplay_api_Update().  The 200ms
-    // block is acceptable; only SCAN (10+ seconds) needs to be async.
     if (command == "CONFIGURE") {
         double freq     = cmd.value("freq", 88.1);
         std::string bw  = cmd.value("bw", "BW_0_200");
@@ -454,9 +422,6 @@ std::string handleCommand(SdrHandler* sdr, const json& cmd) {
 }
 
 
-// =======================================================
-// TCP CONTROL SERVER THREAD
-// =======================================================
 void controlServerThread(SdrHandler* sdr) {
     socket_t srv = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
@@ -520,9 +485,6 @@ void controlServerThread(SdrHandler* sdr) {
 }
 
 
-// =======================================================
-// MAIN
-// =======================================================
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     WSADATA wsaData;

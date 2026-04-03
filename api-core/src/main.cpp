@@ -12,7 +12,6 @@
 #include "dbcorefilter.hpp"
 #include "crow.h"
 
-// 1. Include SQLite for the seed function
 extern "C" {
     #include "sqlite3.h"
 }
@@ -25,11 +24,8 @@ std::unordered_set<crow::websocket::connection*> status_clients;
 redisContext *g_redis_pub = nullptr;
 std::mutex g_redis_pub_mtx;
 
-// ==========================================
-// DB SEED FUNCTION
-// ==========================================
+
 void seedDatabase() {
-    // SMART SEED: Only inject if the database is completely empty!
     if (!getAllLogs().empty()) {
         std::cout << "[API] Database already has data. Skipping seed." << std::endl;
         return;
@@ -106,7 +102,6 @@ int main() {
         return 1;
     }
 
-    // 2. Trigger the seed function automatically on startup
     seedDatabase();
 
     std::cout << "[API] Connecting to Redis..." << std::endl;
@@ -136,10 +131,6 @@ int main() {
         return makeCorsResponse({{"status", "tuned"}});
     });
 
-    // FIX: New route to start and stop live listen mode.
-    // Previously the frontend had no way to send a LIVE_LISTEN or STOP_LIVE
-    // command to the SDR daemon, so g_mode never entered LIVE_LISTEN and
-    // dspWorker never published PCM to Redis. The WebSocket received silence.
     CROW_ROUTE(app, "/api/scan/live").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto x = crow::json::load(req.body); if (!x) return crow::response(400);
@@ -246,7 +237,6 @@ CROW_ROUTE(app, "/api/search")
         std::string q = req.url_params.get("q") ? req.url_params.get("q") : "";
         std::vector<RadioLog> logs;
 
-        // If the search bar is empty, just return everything
         if (q.empty()) {
             logs = getAllLogs();
         } else {
@@ -258,11 +248,9 @@ CROW_ROUTE(app, "/api/search")
                 
                 logs = std::move(locLogs);
                 
-                // DEDUPLICATION LOOP: Only add channel logs if they aren't already in the list
                 for (const auto& chanLog : chanLogs) {
                     bool isDuplicate = false;
                     for (const auto& existingLog : logs) {
-                        // If they have the exact same time and freq, they are the same log
                         if (existingLog.time == chanLog.time && existingLog.freq == chanLog.freq) {
                             isDuplicate = true;
                             break;
@@ -287,14 +275,12 @@ CROW_ROUTE(app, "/api/search")
         return makeCorsResponse(res); 
     });
 
-    // 3. Optional: Hit this route to seed the database manually anytime!
     CROW_ROUTE(app, "/api/dev/seed").methods(crow::HTTPMethod::Post, crow::HTTPMethod::Get)
     ([]() {
         seedDatabase();
         return makeCorsResponse({{"status", "database_seeded_successfully"}});
     });
 
-    // --- DELETE LOG ROUTE ---
     CROW_ROUTE(app, "/api/logs/delete").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
@@ -311,7 +297,6 @@ CROW_ROUTE(app, "/api/search")
         }
     });
 
-    // --- SAVE LOG ROUTE ---
     CROW_ROUTE(app, "/api/logs/save").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
@@ -324,27 +309,20 @@ CROW_ROUTE(app, "/api/search")
         std::string summary = body["summary"].s();
         std::string channelName = body["channelName"].s();
 
-        // Call the insertLog function from dbcorefunctions.cpp
         insertLog(freq, time, location, rawT, summary, channelName);
         
         return makeCorsResponse({{"status", "success"}});
     });
 
-    // The Database Nuke Route
     CROW_ROUTE(app, "/api/dev/clear").methods(crow::HTTPMethod::Post, crow::HTTPMethod::Get)
     ([]() {
         sqlite3 *db;
         if (sqlite3_open(DB_NAME, &db) == SQLITE_OK) {
-            // This SQL command deletes every single row inside the table permanently
             sqlite3_exec(db, "DELETE FROM RadioLogs;", 0, 0, 0);
             sqlite3_close(db);
         }
         return makeCorsResponse({{"status", "database_wiped_clean"}});
     });
-    
-    // ==========================================
-    // AI PIPELINE ROUTES (Bridges React to Redis)
-    // ==========================================
 
     CROW_ROUTE(app, "/api/transcribe/local").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
@@ -368,7 +346,7 @@ CROW_ROUTE(app, "/api/search")
         crow::json::wvalue cmd;
         cmd["command"] = "SUMMARIZE_LOCAL";
         cmd["freq"] = body["freq"].d();
-        cmd["text"] = body["text"].s(); // Passes the raw text to Ollama
+        cmd["text"] = body["text"].s();
 
         std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
         redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
