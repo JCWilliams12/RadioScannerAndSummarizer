@@ -4,6 +4,7 @@
 # =============================================================================
 #
 # Usage:
+#   chmod +x start.sh       to grant access  
 #   ./start.sh              Start everything (relay + Docker + frontend)
 #   ./start.sh stop         Stop everything
 #   ./start.sh relay        Start only the native relay

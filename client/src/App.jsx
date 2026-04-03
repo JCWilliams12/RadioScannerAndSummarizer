@@ -469,15 +469,11 @@ function App() {
   }, [useOpenAI]);
 
 
-  // SCAN HANDLER: kicks off recording only. The WebSocket listener above
+// SCAN HANDLER: kicks off recording only. The WebSocket listener above
   // drives transcription → summarization → completion automatically.
   const handleScan = async () => {
     if (!selectedStation) return;
     const targetFreq = selectedStation.freq;
-
-    setIsScanning(true);
-    setScanProgress(5);
-    setScanStatus(`Connecting to ${Number(targetFreq).toFixed(3)} MHz...`);
 
     setIsScanning(true);
     setScanProgress(5);
@@ -510,89 +506,27 @@ function App() {
         throw new Error(`Recording failed. Status: ${recordRes.status}`);
       }
 
-<<<<<<< HEAD
-      // Animate progress bar during the 30-second recording
+      updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
+
+      // Animate progress
       const recordingStart = Date.now();
       const recordingDuration = 31000;
       const progressInterval = setInterval(() => {
         const elapsed = Date.now() - recordingStart;
         const ratio = Math.min(elapsed / recordingDuration, 1);
-        const currentProgress = Math.round(10 + ratio * 35); // 10% → 45%
+        const currentProgress = Math.round(10 + ratio * 35);
         setScanProgress(currentProgress);
 
         const secondsLeft = Math.max(0, Math.ceil((recordingDuration - elapsed) / 1000));
         setScanStatus(`Hardware: Recording in progress... (${secondsLeft}s remaining)`);
-=======
-      updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
-
-      //Animate progress
-      const recordingStart = Date.now();
-      const recordingDuration = 31000
-      const progressInterval = setInterval(() => {
-        const elapsed = Date.now() - recordingStart;
-      const ratio = Math.min(elapsed / recordingDuration, 1);
-      const currentProgress = Math.round(10 + ratio * 35);
-      setScanProgress(currentProgress);
-
-      const secondsLeft = Math.max(0, Math.ceil((recordingDuration - elapsed) / 1000));
-      setScanStatus(`Hardware: Recording in progress... (${secondsLeft}s remaining)`);
-
-      if (ratio >= 1) clearInterval(progressInterval);}, 500);
-
-      await new Promise(resolve => setTimeout(resolve, recordingDuration));
-      clearInterval(progressInterval);
-
-      //Transcribe
-
-      setScanProgress(50);
-      setScanStatus("Transcribing audio")
-      updateJob(targetFreq, { summary: "AI: Processing transcription...",});
-
->>>>>>> 4e61d40d98899e81863fa1f90bcf7de4a0f894ce
 
         if (ratio >= 1) clearInterval(progressInterval);
       }, 500);
 
+      // Wait for the 31 seconds. 
+      // (After this finishes, the WebSocket listener handles the rest automatically!)
       await new Promise(resolve => setTimeout(resolve, recordingDuration));
       clearInterval(progressInterval);
-
-<<<<<<< HEAD
-      // Recording timer done — the WebSocket listener will receive
-      // record_complete from the daemon and drive the AI pipeline.
-      // Keep the loading bar visible while we wait.
-      setScanProgress(48);
-      setScanStatus("Waiting for AI pipeline...");
-=======
-      //summarize
-      setScanProgress(75);
-      setScanStatus("Generating summary...");
-
-      const summaryRes = await fetch(summarizeRoute, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: rawText }),
-      });
-
-      if (!summaryRes.ok) throw new Error(`Summarization failed (${summaryRes.status})`);
-      const summaryData = await summaryRes.json();
-
-            // Finalize
-      setScanProgress(95);
-      setScanStatus("Finalizing scan...");
-      
-      updateJob(targetFreq, { 
-        status: "complete",
-        summary: summaryData.summary 
-      });
->>>>>>> 4e61d40d98899e81863fa1f90bcf7de4a0f894ce
-
-      await new Promise(r => setTimeout(r, 400));
-      
-      setScanProgress(100);
-      setScanStatus("Scan complete");
-
-      await new Promise(r => setTimeout(r, 800));
-      setIsScanning(false);
 
     } catch (error) {
       console.error(`Scan error on ${targetFreq}:`, error);
@@ -603,11 +537,8 @@ function App() {
       });
       setScanStatus(`Error: ${error.message}`);
       setScanProgress(0);
-<<<<<<< HEAD
-=======
  
       // Keep the error visible briefly before clearing
->>>>>>> 4e61d40d98899e81863fa1f90bcf7de4a0f894ce
       await new Promise(r => setTimeout(r, 2000));
       setIsScanning(false);
     }
@@ -1015,7 +946,7 @@ function App() {
         </div>
       )}
     </div>
-  )
+  );
 }
  
 export default App
