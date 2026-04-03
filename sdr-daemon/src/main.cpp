@@ -26,14 +26,10 @@
 #include <cerrno>
 #include <sys/stat.h>
 
-// =======================================================
 // IQ-OVER-TCP WIRE PROTOCOL
-// =======================================================
 static const uint32_t IQ_HEADER_MAGIC = 0x49515043; // "IQPC"
 
-// =======================================================
 // DEVICE STATE — independent flags (LIVE_LISTEN + RECORDING coexist)
-// =======================================================
 std::atomic<bool> g_scanning(false);
 std::atomic<bool> g_recording(false);
 std::atomic<bool> g_live_listen(false);
@@ -77,9 +73,7 @@ std::mutex              g_heartbeat_mtx;
 std::condition_variable g_heartbeat_cv;
 std::atomic<long>       g_heartbeat_count(0);
 
-// =======================================================
 // TELEMETRY TRACKERS
-// =======================================================
 std::atomic<int>  g_diag_usb_samples(0);
 std::atomic<int>  g_diag_pcm_samples(0);
 std::atomic<int>  g_diag_drop_count(0);
@@ -93,15 +87,11 @@ std::atomic<int> diag_pcm_drop(0);
 std::atomic<int> diag_pcm_write(0);
 std::atomic<long long> diag_demod_time_us(0);
 
-// =======================================================
 // TCP RELAY CONNECTION STATE
-// =======================================================
 std::atomic<int> g_ctrl_fd(-1);
 std::mutex       g_ctrl_mtx;
 
-// =======================================================
 // TCP HELPERS
-// =======================================================
 static int connectToRelay(const char* host, int port) {
     struct addrinfo hints{}, *res;
     hints.ai_family   = AF_UNSPEC;
@@ -148,9 +138,7 @@ static bool sendCtrlCommand(const std::string& json_str) {
 }
 
 
-// =======================================================
 // IQ INGEST (replaces broadcastAudio)
-// =======================================================
 void feedIQToPool(const std::vector<int16_t>& iqBuffer) {
     if (++g_heartbeat_count % 100 == 0) {
         g_heartbeat_cv.notify_all();
@@ -196,9 +184,7 @@ void feedIQToPool(const std::vector<int16_t>& iqBuffer) {
 }
 
 
-// =======================================================
 // THREAD 1: TCP READER
-// =======================================================
 void tcpReaderThread(const char* host, int port) {
     std::vector<int16_t> recv_buf;
     recv_buf.reserve(65536);
@@ -259,9 +245,7 @@ void tcpReaderThread(const char* host, int port) {
 }
 
 
-// =======================================================
 // BIQUAD FILTER
-// =======================================================
 struct Biquad {
     double b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
     double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
@@ -291,10 +275,7 @@ struct Biquad {
     }
 };
 
-
-// =======================================================
 // THREAD 2: DEMOD THREAD — Clean FM Broadcast DSP
-// =======================================================
 void demodThread() {
     std::cout << "[DEMOD] *** BUILD v13-CLEAN: Butterworth ch@100k + audio@15k, "
               << "75us de-emph, 500k->16k linear resamp ***" << std::endl;
@@ -460,10 +441,7 @@ void demodThread() {
     }
 }
 
-
-// =======================================================
 // THREAD 3: OUTPUT THREAD
-// =======================================================
 void outputThread() {
     redisContext* local_redis = redisConnect("ag-redis", 6379);
 
@@ -499,10 +477,7 @@ void outputThread() {
     }
 }
 
-
-// =======================================================
 // THREAD 4: CONTROL SOCKET READER
-// =======================================================
 void ctrlReaderThread(const char* host, int port) {
     while (true) {
         std::cout << "[TCP-CTRL] Connecting to relay control at "
@@ -570,10 +545,7 @@ void ctrlReaderThread(const char* host, int port) {
     }
 }
 
-
-// =======================================================
 // THREAD 5: REDIS COMMAND LISTENER
-// =======================================================
 void commandListener() {
     redisContext* c = redisConnect("ag-redis", 6379);
     if (!c || c->err) {
@@ -609,7 +581,7 @@ void commandListener() {
 
             g_current_freq = targetFreq;
 
-            // ---- TUNE: forward to relay (blocked only during scan) ----
+            // TUNE: forward to relay (blocked only during scan) ----
             // FIX: sendCtrlCommand is fast (mutex + send) — no thread needed.
             // Wrapping it in a thread added scheduling latency and was unnecessary.
             if (cmd == "TUNE" && !g_scanning.load(std::memory_order_relaxed)) {
@@ -618,7 +590,7 @@ void commandListener() {
                 relay_cmd["freq"]    = targetFreq;
                 sendCtrlCommand(relay_cmd.dump());
             }
-            // ---- RECORD: allowed unless scanning (can coexist with LIVE_LISTEN) ----
+            // RECORD: allowed unless scanning (can coexist with LIVE_LISTEN) ----
             else if (cmd == "RECORD" && !g_scanning.load(std::memory_order_relaxed)
                                      && !g_recording.load(std::memory_order_relaxed)) {
                 g_recording.store(true, std::memory_order_release);
@@ -733,12 +705,12 @@ void commandListener() {
                     }).detach();
                 }
             }
-            // ---- STOP_LIVE ----
+            // STOP_LIVE 
             else if (cmd == "STOP_LIVE" && g_live_listen.load(std::memory_order_relaxed)) {
                 g_live_listen.store(false, std::memory_order_release);
                 std::cout << "[Live] Stopped." << std::endl;
             }
-            // ---- SCAN: exclusive ----
+            // SCAN: exclusive 
             else if (cmd == "SCAN" && !g_scanning.load(std::memory_order_relaxed)
                                    && !g_recording.load(std::memory_order_relaxed)
                                    && !g_live_listen.load(std::memory_order_relaxed)) {
@@ -754,16 +726,12 @@ void commandListener() {
     redisFree(c);
 }
 
-
-// =======================================================
 // MOCK MODE — No SDR hardware, full pipeline test
-// =======================================================
 // Activated by SDR_MODE=mock environment variable.
 // SCAN returns fake stations, RECORD sleeps then signals
 // completion (expects a pre-existing audio.wav), LIVE_LISTEN
 // streams a 440 Hz sine tone through Redis so the full
 // WebSocket → frontend audio path is exercised.
-// =======================================================
 
 static std::atomic<bool> g_mock_live_active(false);
 
@@ -827,12 +795,12 @@ void mockCommandListener() {
 
             std::string cmd = json["command"].s();
 
-            // ---- TUNE: log only ----
+            // TUNE: log only
             if (cmd == "TUNE") {
                 double freq = json.has("freq") ? json["freq"].d() : 0.0;
                 std::cout << "[Mock SDR] Tuned to " << freq << " MHz (simulated)" << std::endl;
             }
-            // ---- SCAN: return fake stations after short delay ----
+            // SCAN: return fake stations after short delay 
             else if (cmd == "SCAN") {
                 std::cout << "[Mock SDR] Starting simulated scan..." << std::endl;
 
@@ -858,7 +826,7 @@ void mockCommandListener() {
                     }
                 }).detach();
             }
-            // ---- RECORD: sleep 30s, signal completion (audio.wav already exists) ----
+            // RECORD: sleep 30s, signal completion (audio.wav already exists)
             else if (cmd == "RECORD") {
                 double freq = json.has("freq") ? json["freq"].d() : 0.0;
                 std::cout << "[Mock SDR] Recording " << freq << " MHz (simulated 30s)..." << std::endl;
@@ -879,7 +847,7 @@ void mockCommandListener() {
                     }
                 }).detach();
             }
-            // ---- LIVE_LISTEN: stream sine tone ----
+            // LIVE_LISTEN: stream sine tone 
             else if (cmd == "LIVE_LISTEN") {
                 double freq = json.has("freq") ? json["freq"].d() : 0.0;
                 if (!g_mock_live_active.load(std::memory_order_relaxed)) {
@@ -888,7 +856,7 @@ void mockCommandListener() {
                     std::cout << "[Mock SDR] Live listen started for " << freq << " MHz (440 Hz tone)" << std::endl;
                 }
             }
-            // ---- STOP_LIVE ----
+            // STOP_LIVE 
             else if (cmd == "STOP_LIVE") {
                 g_mock_live_active.store(false, std::memory_order_release);
                 std::cout << "[Mock SDR] Live listen stopped." << std::endl;
@@ -899,10 +867,6 @@ void mockCommandListener() {
     redisFree(c);
 }
 
-
-// =======================================================
-// MAIN
-// =======================================================
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
 
@@ -928,7 +892,7 @@ int main() {
         return 0;
     }
 
-    // ---- Live mode: connect to relay ----
+    // Live mode: connect to relay
     const char* relay_host_env = std::getenv("SDR_RELAY_HOST");
     const char* relay_data_env = std::getenv("SDR_RELAY_DATA_PORT");
     const char* relay_ctrl_env = std::getenv("SDR_RELAY_CTRL_PORT");

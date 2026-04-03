@@ -24,7 +24,7 @@ std::unordered_set<crow::websocket::connection*> status_clients;
 redisContext *g_redis_pub = nullptr;
 std::mutex g_redis_pub_mtx;
 
-
+// Seeding the database for mockup versions 
 void seedDatabase() {
     if (!getAllLogs().empty()) {
         std::cout << "[API] Database already has data. Skipping seed." << std::endl;
@@ -114,14 +114,18 @@ int main() {
 
     std::thread(redisListenerThread).detach();
 
+
+    // Manages websocket connect for streaming real-time audio data
     CROW_WEBSOCKET_ROUTE(app, "/ws/audio")
     .onopen([](crow::websocket::connection& conn) { std::lock_guard<std::mutex> lock(ws_audio_mtx); audio_clients.insert(&conn); })
     .onclose([](crow::websocket::connection& conn, const std::string&) { std::lock_guard<std::mutex> lock(ws_audio_mtx); audio_clients.erase(&conn); });
 
+    // Manages websocket conection to broadcast system updates (scan progress and AI processing scan) in the front end 
     CROW_WEBSOCKET_ROUTE(app, "/ws/status")
     .onopen([](crow::websocket::connection& conn) { std::lock_guard<std::mutex> lock(ws_status_mtx); status_clients.insert(&conn); })
     .onclose([](crow::websocket::connection& conn, const std::string&) { std::lock_guard<std::mutex> lock(ws_status_mtx); status_clients.erase(&conn); });
 
+    // Focuses on instructing the SDR hardware to shift to a specific grequenciy via Redis 
     CROW_ROUTE(app, "/api/scan/tune").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto x = crow::json::load(req.body); if (!x) return crow::response(400);
@@ -131,6 +135,7 @@ int main() {
         return makeCorsResponse({{"status", "tuned"}});
     });
 
+    // Publishes Live_listen and stop_live commands via redis to toggel real-time audio stream from SDR
     CROW_ROUTE(app, "/api/scan/live").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto x = crow::json::load(req.body); if (!x) return crow::response(400);
@@ -148,6 +153,7 @@ int main() {
         return makeCorsResponse({{"status", action == "start" ? "live_started" : "live_stopped"}});
     });
 
+    // Record command via Redis, triggering sdr hardware to capture 30-second audio sample of selected frequency 
     CROW_ROUTE(app, "/api/scan/record").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto x = crow::json::load(req.body); if (!x) return crow::response(400);
@@ -157,6 +163,8 @@ int main() {
         return makeCorsResponse({{"status", "recording_started"}});
     });
 
+    // Triggers a full spectrum sweep by publishing a scan command to the sdr. 
+    // Temporily subscribes to redis to wait for results and returns array of discovered stations 
     CROW_ROUTE(app, "/api/scan/wideband")
     ([]() {
         crow::json::wvalue cmd;
@@ -195,6 +203,7 @@ int main() {
         return response;
     });
 
+    // Fetches and returns all saved radio interception logs from SQLite database 
     CROW_ROUTE(app, "/api/logs")([]() {
         std::vector<RadioLog> logs = getAllLogs();
         crow::json::wvalue res;
@@ -209,6 +218,7 @@ int main() {
         return makeCorsResponse(res);
     });
 
+    // Retrieves a specific subset of database logs filtered given by the channel from user 
     CROW_ROUTE(app, "/api/filter/channel")
     ([](const crow::request& req) {
         std::string channel = req.url_params.get("name") ? req.url_params.get("name") : "";
@@ -231,7 +241,8 @@ int main() {
         }
         return makeCorsResponse(res); 
     });
-
+// Multi-parameter search across the database, attempting to match the query against freq, location or channel name. 
+// Prevents duplicate results 
 CROW_ROUTE(app, "/api/search")
     ([](const crow::request& req) {
         std::string q = req.url_params.get("q") ? req.url_params.get("q") : "";
@@ -275,12 +286,14 @@ CROW_ROUTE(app, "/api/search")
         return makeCorsResponse(res); 
     });
 
+    // Dev utility route to populate database with dummy data for testing 
     CROW_ROUTE(app, "/api/dev/seed").methods(crow::HTTPMethod::Post, crow::HTTPMethod::Get)
     ([]() {
         seedDatabase();
         return makeCorsResponse({{"status", "database_seeded_successfully"}});
     });
 
+    // Removes specific log entry from DB that user has selected 
     CROW_ROUTE(app, "/api/logs/delete").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
@@ -297,6 +310,7 @@ CROW_ROUTE(app, "/api/search")
         }
     });
 
+    // Inserts new completed records (freq, time, raw text and AI sum) into DB 
     CROW_ROUTE(app, "/api/logs/save").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
@@ -314,6 +328,7 @@ CROW_ROUTE(app, "/api/search")
         return makeCorsResponse({{"status", "success"}});
     });
 
+    // Dev utility rout that completely wipes all records from RadioLogs DB table 
     CROW_ROUTE(app, "/api/dev/clear").methods(crow::HTTPMethod::Post, crow::HTTPMethod::Get)
     ([]() {
         sqlite3 *db;
@@ -324,6 +339,7 @@ CROW_ROUTE(app, "/api/search")
         return makeCorsResponse({{"status", "database_wiped_clean"}});
     });
 
+    // Publishes command to AI owrker to transcribe an audio file using the whisper.cpp
     CROW_ROUTE(app, "/api/transcribe/local").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
@@ -337,7 +353,7 @@ CROW_ROUTE(app, "/api/search")
         redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
         return makeCorsResponse({{"status", "transcribing"}});
     });
-
+    // Publishes command to AI worker to transcribe a text summary of trancsription using local model LLama.cpp 
     CROW_ROUTE(app, "/api/summarize/local").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
@@ -352,7 +368,7 @@ CROW_ROUTE(app, "/api/search")
         redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
         return makeCorsResponse({{"status", "summarizing"}});
     });
-
+    // Publishes command to Ai worker to transcribe an audio file using 3o mini cloud model 
     CROW_ROUTE(app, "/api/transcribe/openai").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
@@ -366,7 +382,7 @@ CROW_ROUTE(app, "/api/search")
         redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
         return makeCorsResponse({{"status", "transcribing"}});
     });
-
+    // Publishes cmmand to AI worker to generate a text from transcribed text using open ais cloud model 
     CROW_ROUTE(app, "/api/summarize/openai").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
