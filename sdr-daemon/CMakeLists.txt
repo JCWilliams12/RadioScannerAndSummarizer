@@ -11,30 +11,17 @@ include_directories(src/sdr)
 include_directories(src/iqtowav)
 include_directories(/usr/local/include)
 
-# Find the SDRplay library specifically
-find_library(SDRPLAY_LIB 
-    NAMES sdrplay_api
-    PATHS /usr/local/lib
-    NO_DEFAULT_PATH
-)
-
-if(NOT SDRPLAY_LIB)
-    message(FATAL_ERROR "Linker cannot find libsdrplay_api.so in /usr/local/lib. Check Dockerfile symlink logic.")
-endif()
-
-message(STATUS "Found SDRplay API at: ${SDRPLAY_LIB}")
-
-# Find Source Files
+# Find Source Files — exclude sdr_handler.cpp (moved to sdr-relay)
 file(GLOB_RECURSE SDR_SOURCES "src/*.cpp")
+list(FILTER SDR_SOURCES EXCLUDE REGEX ".*sdr_handler\\.cpp$")
 
 # Define Executable
 add_executable(sdr_daemon ${SDR_SOURCES})
 
-# Link Libraries
+# Link Libraries (no sdrplay_api)
 target_link_libraries(sdr_daemon 
     Threads::Threads 
     hiredis
     liquid 
     sndfile
-    ${SDRPLAY_LIB}
 )

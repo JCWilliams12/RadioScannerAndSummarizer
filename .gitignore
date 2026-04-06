@@ -41,3 +41,15 @@ sdr_daemon
 
 shared-data/models/ggml-base.en.bin
 shared-data/models/Phi-3-mini-4k-instruct-q4.gguf
+
+
+# AetherGuard start script runtime files
+.sdr-relay.pid
+.sdr-relay.log
+.docker-compose.pid
+.frontend.pid
+.frontend.log
+ 
+# Relay build artifacts
+sdr-relay/build/
+ 

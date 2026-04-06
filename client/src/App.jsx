@@ -46,7 +46,7 @@ const ScanProgress = ({ status, progress }) => {
         width: '100%',
         maxWidth: '320px',
         height: '8px',
-        backgroundColor: 'rgba(0, 43, 94, 0.2)',
+        backgroundColor: 'rgba(3, 3, 3, 0.2)',
         borderRadius: '4px',
         overflow: 'hidden',
         position: 'relative',
@@ -182,16 +182,20 @@ function App() {
   const [selectedLog, setSelectedLog] = useState(null);
   const [logs, setLogs] = useState([]);
 
-  // State for search term
-  const [searchTerm, setSearchTerm] = useState("");
-
-  // State that tracks whether a search is active.
+  // --- Advanced Filtering State ---
+  const [showFilters, setShowFilters] = useState(false);
   const [isSearchActive, setIsSearchActive] = useState(false);
+  const [filterFreq, setFilterFreq] = useState("");
+  const [filterLoc, setFilterLoc] = useState("");
+  const [filterKeyword, setFilterKeyword] = useState("");
+  const [filterStart, setFilterStart] = useState("");
+  const [filterEnd, setFilterEnd] = useState("");
 
   // --- Scan loading state ---
   const [isScanning, setIsScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
   const [scanProgress, setScanProgress] = useState(0);
+
 
   // For Playback function on DB page
   const [showPlaybackMenu, setShowPlaybackMenu] = useState(false);
@@ -211,12 +215,51 @@ function App() {
   const audioCtxRef = useRef(null);
   const wsRef = useRef(null);
 
-  // --- FIX: Scheduler ref to queue audio chunks back-to-back ---
   // Without this, all chunks fire at "now" causing rhythmic gaps/stuttering
   const nextPlayTimeRef = useRef(0);
 
   // Scanner State
   const [isScanningBand, setIsScanningBand] = useState(false);
+
+  const [isAgentOpen, setIsAgentOpen] = useState(false);
+  const [agentMessages, setAgentMessages] = useState([]);
+  const [agentInput, setAgentInput] = useState("");
+  const [isAgentThinking, setIsAgentThinking] = useState(false);
+
+  const handleAgentSubmit = async (e) => {
+    e.preventDefault();
+    if (!agentInput.trim() || isAgentThinking) return;
+
+    const userText = agentInput.trim();
+    setAgentInput("");
+    setIsAgentThinking(true);
+
+    // Keep only the last 2 interactions (4 messages) to save tokens
+    const recentHistory = agentMessages.slice(-4);
+    const newMessages = [...recentHistory, { role: "user", content: userText }];
+    
+    // Optimistically update UI
+    setAgentMessages([...agentMessages, { role: "user", content: userText }]);
+
+    try {
+      const res = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: newMessages })
+      });
+      const data = await res.json();
+      
+      if (data.answer) {
+        setAgentMessages(prev => [...prev, { role: "assistant", content: data.answer }]);
+      } else {
+        setAgentMessages(prev => [...prev, { role: "assistant", content: "Error: Agent failed to respond." }]);
+      }
+    } catch (err) {
+      setAgentMessages(prev => [...prev, { role: "assistant", content: "Connection error." }]);
+    } finally {
+      setIsAgentThinking(false);
+    }
+  };
 
   const formatTime = (timeInSeconds) => {
     if (isNaN(timeInSeconds)) return "00:00";
@@ -233,10 +276,14 @@ function App() {
       const data = await res.json();
       setLogs(data);
       setIsSearchActive(false);
-      setSearchTerm('');
+      clearFilterInputs();
     } catch (err) {
       console.error("Failed to fetch logs:", err);
     }
+  };
+
+  const clearFilterInputs = () => {
+    setFilterFreq(""); setFilterLoc(""); setFilterKeyword(""); setFilterStart(""); setFilterEnd("");
   };
 
   const fetchStations = async () => {
@@ -249,22 +296,40 @@ function App() {
     }
   };
 
-  const searchDatabase = async () => {
+  const executeAdvancedSearch = async () => {
     try {
-    // We send the 'searchTerm' variable to our C++ Crow server
-      const response = await fetch(`http://localhost:8080/api/search?q=${searchTerm}`);
+      const params = new URLSearchParams();
+      if (filterFreq) params.append('freq', filterFreq);
+      if (filterLoc) params.append('loc', filterLoc);
+      if (filterKeyword) params.append('keyword', filterKeyword);
+      
+      // Convert browser Local Time to Unix Epochs for the C++ backend
+      if (filterStart && filterEnd) {
+        const startUnix = Math.floor(new Date(filterStart).getTime() / 1000);
+        const endUnix = Math.floor(new Date(filterEnd).getTime() / 1000);
+        params.append('start', startUnix);
+        params.append('end', endUnix);
+      } else if (filterStart || filterEnd) {
+        alert("Please provide both a Start and End time for a date range search.");
+        return;
+      }
+
+      const response = await fetch(`http://localhost:8080/api/search/advanced?${params.toString()}`);
       const data = await response.json();
-      setLogs(data); // This will replace the logs list with the search results
+      setLogs(data); 
       setIsSearchActive(true);
     } catch (error) {
-      console.error("Failed to connect to C++ backend:", error);
+      console.error("Failed to fetch advanced search results:", error);
     }
   };
+
+
 
   useEffect(() => {
     fetchStations();
     fetchLogs(); 
   }, []);
+
 
   // Close Playback menu when clicking outside of it
   useEffect(() => {
@@ -285,6 +350,7 @@ function App() {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [showPlaybackMenu]);
+
   
   // WIDEBAND FM SPECTRUM SWEEP
   const handleWidebandSweep = async () => {
@@ -309,10 +375,9 @@ function App() {
     }
   };
 
-  // LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
+// LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
   useEffect(() => {
     if (isListeningLive && selectedStation) {
-      // FIX: Force the AudioContext to match the backend 48kHz output
       audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({
         sampleRate: 16000
       });
@@ -327,7 +392,7 @@ function App() {
         if (!audioCtxRef.current) return;
         
         const pcm16 = new Int16Array(event.data);
-        // FIX: Buffer set to exactly 16000 Hz to prevent playback distortion
+        // Buffer set to exactly 16000 Hz to prevent playback distortion
         const audioBuffer = audioCtxRef.current.createBuffer(1, pcm16.length, 16000);
         const channelData = audioBuffer.getChannelData(0);
         for (let i = 0; i < pcm16.length; i++) {
@@ -338,7 +403,7 @@ function App() {
         source.buffer = audioBuffer;
         source.connect(audioCtxRef.current.destination);
 
-        // --- Schedule chunks back-to-back using a running clock ---
+        // Schedule chunks back-to-back using a running clock
         const currentTime = audioCtxRef.current.currentTime;
         if (nextPlayTimeRef.current < currentTime) {
           // Fell behind (underrun) - re-sync with a small 50ms buffer
@@ -348,7 +413,6 @@ function App() {
         nextPlayTimeRef.current += audioBuffer.duration;
       };
 
-      // FIX: Trigger the LIVE_LISTEN command on the backend explicitly
       fetch('/api/scan/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -366,7 +430,6 @@ function App() {
         audioCtxRef.current = null;
       }
       
-      // FIX: Ensure backend terminates the live listen stream when off
       fetch('/api/scan/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -393,7 +456,9 @@ function App() {
     let objectUrl = "";
 
     if (showPlaybackMenu && selectedLog) {
-      fetch("/api/audio/audio.wav")
+      // Pull dynamic audio path if available, fallback to default
+      const fetchPath = selectedLog.audioFilePath || "/api/audio/audio.wav";
+      fetch(fetchPath)
         .then(res => res.blob())
         .then(blob => {
           objectUrl = URL.createObjectURL(blob);
@@ -407,7 +472,9 @@ function App() {
     };
   }, [showPlaybackMenu, selectedLog]);
 
-  // --- NEW: Status WebSocket Listener ---
+  // THE 3-STEP SCAN HANDLER (Record -> Transcribe -> Summarize)
+// THE ASYNC PIPELINE: WebSocket listener drives transcription + summarization.
+  // handleScan only kicks off the recording. This listener handles the rest.
   useEffect(() => {
     const statusWs = new WebSocket(`ws://${window.location.host}/ws/status`);
     
@@ -416,9 +483,11 @@ function App() {
       const freq = data.freq;
 
       if (data.event === "record_complete") {
+        // Recording finished → kick off transcription
+        setScanProgress(50);
+        setScanStatus("AI: Transcribing audio...");
         updateJob(freq, { summary: "AI: Processing transcription..." });
         
-        // Trigger Transcribe Request
         fetch(useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -426,12 +495,14 @@ function App() {
         });
       } 
       else if (data.event === "transcription_complete") {
+        // Transcription finished → show text immediately, kick off summary
+        setScanProgress(75);
+        setScanStatus("AI: Generating summary...");
         updateJob(freq, { 
           rawText: data.text,
           summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
         });
 
-        // Trigger Summarize Request
         fetch(useOpenAI ? '/api/summarize/openai' : '/api/summarize/local', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -439,10 +510,19 @@ function App() {
         });
       }
       else if (data.event === "summary_complete") {
+        // Summary finished → show it, then dismiss the loading bar
+        setScanProgress(100);
+        setScanStatus("Scan complete!");
         updateJob(freq, { 
           status: "complete",
           summary: data.summary 
         });
+
+        // Brief pause so user sees "100% / Scan complete!", then dismiss
+        setTimeout(() => {
+          setIsScanning(false);
+          setScanProgress(0);
+        }, 1200);
       }
     };
 
@@ -450,10 +530,15 @@ function App() {
   }, [useOpenAI]);
 
 
-  // THE 3-STEP SCAN HANDLER (Refactored for Async WebSockets)
+  // SCAN HANDLER: kicks off recording only. The WebSocket listener above
+  // drives transcription → summarization → completion automatically.
   const handleScan = async () => {
     if (!selectedStation) return;
     const targetFreq = selectedStation.freq;
+
+    setIsScanning(true);
+    setScanProgress(5);
+    setScanStatus(`Connecting to ${Number(targetFreq).toFixed(3)} MHz...`);
 
     updateJob(targetFreq, { 
       status: "recording",
@@ -462,15 +547,60 @@ function App() {
     });
 
     try {
-      await fetch('/api/scan/record', {
+      setScanProgress(10);
+      setScanStatus("Hardware: Starting 30-second recording...");
+      
+      const recordRes = await fetch('/api/scan/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ freq: parseFloat(targetFreq) })
       });
-      // The rest is handled automatically by the WebSocket listener above!
+
+      let recordData = null;
+      try {
+        recordData = await recordRes.json();
+      } catch {
+        throw new Error(`Record endpoint returned non-JSON (status: ${recordRes.status}).`);
+      }
+
+      if (!recordRes.ok || recordData?.status !== "recording_started") {
+        throw new Error(`Recording failed. Status: ${recordRes.status}`);
+      }
+
+      // Animate progress bar during the 30-second recording
+      const recordingStart = Date.now();
+      const recordingDuration = 31000;
+      const progressInterval = setInterval(() => {
+        const elapsed = Date.now() - recordingStart;
+        const ratio = Math.min(elapsed / recordingDuration, 1);
+        const currentProgress = Math.round(10 + ratio * 35); // 10% → 45%
+        setScanProgress(currentProgress);
+
+        const secondsLeft = Math.max(0, Math.ceil((recordingDuration - elapsed) / 1000));
+        setScanStatus(`Hardware: Recording in progress... (${secondsLeft}s remaining)`);
+
+        if (ratio >= 1) clearInterval(progressInterval);
+      }, 500);
+
+      await new Promise(resolve => setTimeout(resolve, recordingDuration));
+      clearInterval(progressInterval);
+
+      // Recording timer done — WebSocket listener takes over from here.
+      // Keep the loading bar visible while waiting for record_complete event.
+      setScanProgress(48);
+      setScanStatus("Waiting for AI pipeline...");
+
     } catch (error) {
       console.error(`Scan error on ${targetFreq}:`, error);
-      updateJob(targetFreq, { status: "error", summary: `Error: ${error.message}` });
+      updateJob(targetFreq, { 
+        status: "error",
+        summary: `Error: ${error.message}`,
+        rawText: "Scan failed. Check server console."
+      });
+      setScanStatus(`Error: ${error.message}`);
+      setScanProgress(0);
+      await new Promise(r => setTimeout(r, 2000));
+      setIsScanning(false);
     }
   };
 
@@ -611,18 +741,50 @@ function App() {
         <div className="database-view-wrapper">
           <div className="scanning-grid">
             <div className="data-box">
-              <div className="search-bar-container" style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '15px' }}>
-                <h3 style={{ borderBottom: 'none', paddingBottom: 0, margin: 0, whiteSpace: 'nowrap' }}>Saved Logs</h3>
-                <input type="text" placeholder="Search by freq..." className="search-input" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && searchDatabase()} />
-                {isSearchActive ? (
-                  <button className="back-btn" style={{ marginBottom: 0, padding: '8px 16px', backgroundColor: '#800000' }} onClick={fetchLogs}>Cancel</button>
-                  ) : (
-                  <button className="back-btn" style={{ marginBottom: 0, padding: '8px 16px' }} onClick={searchDatabase}>Search</button>)}
+              {/* ADVANCED FILTER HEADER */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <h3 style={{ margin: 0, borderBottom: 'none' }}>Saved Logs</h3>
+                <button 
+                  onClick={() => setShowFilters(!showFilters)}
+                  style={{ backgroundColor: 'transparent', color: '#8cb4d5', border: '1px solid #004080', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85em' }}
+                >
+                  {showFilters ? 'Hide Filters ▲' : 'Advanced Filters ▼'}
+                </button>
               </div>
+
+              {/* ADVANCED FILTER PANEL */}
+              {showFilters && (
+                <div style={{ backgroundColor: 'rgba(0,0,0,0.2)', padding: '10px', borderRadius: '6px', marginBottom: '15px', display: 'flex', flexDirection: 'column', gap: '8px', border: '1px solid #002b5e' }}>
+                  <input type="text" placeholder="Keyword (Search AI & Transcripts)" className="search-input" value={filterKeyword} onChange={(e) => setFilterKeyword(e.target.value)} />
+                  
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <input type="number" placeholder="Freq (MHz)" className="search-input" style={{ flex: 1 }} value={filterFreq} onChange={(e) => setFilterFreq(e.target.value)} />
+                    <input type="text" placeholder="Location" className="search-input" style={{ flex: 1 }} value={filterLoc} onChange={(e) => setFilterLoc(e.target.value)} />
+                  </div>
+                  
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+                      <label style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '2px' }}>Start Time</label>
+                      <input type="datetime-local" className="search-input" value={filterStart} onChange={(e) => setFilterStart(e.target.value)} />
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+                      <label style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '2px' }}>End Time</label>
+                      <input type="datetime-local" className="search-input" value={filterEnd} onChange={(e) => setFilterEnd(e.target.value)} />
+                    </div>
+                  </div>
+                  
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '5px' }}>
+                    {isSearchActive && (
+                      <button onClick={fetchLogs} style={{ backgroundColor: '#800000', color: 'white', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer' }}>Clear</button>
+                    )}
+                    <button onClick={executeAdvancedSearch} style={{ backgroundColor: '#004080', color: 'white', border: 'none', padding: '6px 16px', borderRadius: '4px', cursor: 'pointer' }}>Search DB</button>
+                  </div>
+                </div>
+              )}
               <ul className="frequency-list">
                 {logs.map(log => (
                   <li 
-                    key={log.id}
+                    key={`${log.freq}-${log.time}`}
                     onClick={() => setSelectedLog(log)}
                     className={selectedLog?.id === log.id ? "active-station" : ""}
                   >
@@ -766,6 +928,65 @@ function App() {
         </div>
       )}
 
+      {/* FLOATING AGENT WIDGET */}
+      {view === 'database' && (
+        <div style={{
+          position: 'fixed', bottom: '20px', right: '20px', width: '350px',
+          backgroundColor: '#001a33', border: '1px solid #004080', borderRadius: '8px',
+          boxShadow: '0 8px 16px rgba(0,0,0,0.5)', zIndex: 1000,
+          display: 'flex', flexDirection: 'column', overflow: 'hidden'
+        }}>
+          {/* Header (Click to toggle) */}
+          <div 
+            onClick={() => setIsAgentOpen(!isAgentOpen)}
+            style={{ padding: '10px 15px', backgroundColor: '#002b5e', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 'bold' }}
+          >
+            <span>AetherGuard Agent</span>
+            <span>{isAgentOpen ? '▼' : '▲'}</span>
+          </div>
+
+          {/* Body */}
+          {isAgentOpen && (
+            <div style={{ height: '350px', display: 'flex', flexDirection: 'column' }}>
+              {!useOpenAI ? (
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8cb4d5', padding: '20px', textAlign: 'center' }}>
+                  Database agent disabled for local model. Switch to OpenAI to enable.
+                </div>
+              ) : (
+                <>
+                  <div style={{ flex: 1, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {agentMessages.length === 0 && (
+                      <div style={{ color: '#5a8aad', fontSize: '0.85em', textAlign: 'center' }}>Ask me about the database records.</div>
+                    )}
+                    {agentMessages.map((msg, idx) => (
+                      <div key={idx} style={{ alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', backgroundColor: msg.role === 'user' ? '#004080' : 'rgba(255,255,255,0.05)', padding: '8px 12px', borderRadius: '6px', maxWidth: '85%', fontSize: '0.9em', color: 'white' }}>
+                        {msg.content}
+                      </div>
+                    ))}
+                    {isAgentThinking && (
+                      <div style={{ alignSelf: 'flex-start', color: '#8cb4d5', fontSize: '0.85em', fontStyle: 'italic' }}>Agent is thinking...</div>
+                    )}
+                  </div>
+                  <form onSubmit={handleAgentSubmit} style={{ display: 'flex', padding: '10px', borderTop: '1px solid #004080', backgroundColor: 'rgba(0,0,0,0.2)' }}>
+                    <input 
+                      type="text" 
+                      value={agentInput} 
+                      onChange={(e) => setAgentInput(e.target.value)} 
+                      placeholder="Search the logs..." 
+                      style={{ flex: 1, padding: '8px', borderRadius: '4px', border: '1px solid #333', backgroundColor: '#001a33', color: 'white' }}
+                      disabled={isAgentThinking}
+                    />
+                    <button type="submit" disabled={isAgentThinking} style={{ marginLeft: '8px', padding: '8px 12px', backgroundColor: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: isAgentThinking ? 'not-allowed' : 'pointer' }}>
+                      Send
+                    </button>
+                  </form>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
  {/* SCANNING VIEW */}
       {view === 'scanning' && (
         <div className="scanning-container">
@@ -776,7 +997,7 @@ function App() {
               <button 
                 className="sub-btn" 
                 onClick={handleWidebandSweep}
-                disabled={isScanningBand}
+                disabled={isScanningBand || isScanning}
                 style={{ 
                   width: '100%',      
                   marginBottom: '15px', 
@@ -796,11 +1017,13 @@ function App() {
                 {isScanningBand ? "Sweeping Spectrum (88-108 MHz)..." : "Auto-Find Stations"}
               </button>
 
-              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none' }}>
+              {/* Zeroed out default browser list spacing and made it scrollable */}
+              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none', opacity: isScanning ? 0.5 : 1, pointerEvents: isScanning ? 'none' : 'auto' }}>
                 {stations.map(s => (
                   <li 
                     key={s.id}
                     onClick={() => {
+                      if (isScanning) return;
                       setSelectedStation(s);
                       setIsListeningLive(false);
                     }}
@@ -818,26 +1041,22 @@ function App() {
             <div className="data-box">
               <h3>Transmission Summary</h3>
               <div className="summary-content">
-                {/* Show progress bar when scanning, normal content otherwise */}
-                {isScanning ? (
-                  <ScanProgress status={scanStatus} progress={scanProgress} />
-                ) : (
-                  <>
-                    <p className="summary-text">
-                      {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
-                    </p>
-                    <hr style={{ borderColor: '#333', margin: '10px 0' }} />
-                    
-                    <p className="summary-text"><strong>AI Summary:</strong> {displaySummary}</p>
+                {/* Progress bar shows on top during scanning, results always visible below */}
+                {isScanning && <ScanProgress status={scanStatus} progress={scanProgress} />}
+                
+                <p className="summary-text">
+                  {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
+                </p>
+                <hr style={{ borderColor: '#333', margin: '10px 0' }} />
+                
+                <p className="summary-text"><strong>AI Summary:</strong> {displaySummary}</p>
 
-                    {displayRawText && (
-                      <>
-                        <br/>
-                        <p className="summary-text" style={{ fontSize: "0.85em", color: "#bbb" }}>
-                          <em>Raw Text: {displayRawText}</em>
-                        </p>
-                      </>
-                    )}
+                {displayRawText && (
+                  <>
+                    <br/>
+                    <p className="summary-text" style={{ fontSize: "0.85em", color: "#bbb" }}>
+                      <em>Raw Text: {displayRawText}</em>
+                    </p>
                   </>
                 )}
               </div>
@@ -850,7 +1069,7 @@ function App() {
                     color: 'white' 
                   }}
                   onClick={() => setIsListeningLive(!isListeningLive)} 
-                  disabled={!selectedStation || isScanning}
+                  disabled={!selectedStation}
                 >
                   {isListeningLive ? "Stop Live Audio" : "Listen Live"}
                 </button>
@@ -866,7 +1085,7 @@ function App() {
                 <button 
                   className="sub-btn save-btn" 
                   onClick={handleSave} 
-                  disabled={!selectedStation || isScanning}
+                  disabled={!selectedStation || isScanning || currentJob?.status !== 'complete'}
                 >
                   Save
                 </button>

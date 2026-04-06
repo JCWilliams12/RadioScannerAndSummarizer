@@ -1,29 +1,31 @@
-version: '3.8'
-
 services:
   ag-redis:
     image: redis:alpine
     container_name: ag-redis
-    platform: linux/amd64
     ports:
       - "6379:6379"
     networks:
       - aetherguard_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
 
   ag-api:
     build:
       context: .
       dockerfile: api-core/Dockerfile
     container_name: ag-api
-    platform: linux/amd64
     ports:
-      - "8080:8080" # Keeping it on 8080 so React doesn't break
+      - "8080:8080"
     volumes:
       - ./shared-data:/app/shared
     env_file:
       - .env
     depends_on:
-      - ag-redis
+      ag-redis:                           # <--- Hyphen removed!
+        condition: service_healthy
     networks:
       - aetherguard_net
 
@@ -32,13 +34,13 @@ services:
       context: .
       dockerfile: ai-worker/Dockerfile
     container_name: ag-ai
-    platform: linux/amd64
     volumes:
       - ./shared-data:/app/shared
     env_file:
       - .env
     depends_on:
-      - ag-redis
+      ag-redis:                           # <--- Updated!
+        condition: service_healthy
     networks:
       - aetherguard_net
 
@@ -47,21 +49,20 @@ services:
       context: .
       dockerfile: sdr-daemon/Dockerfile
     container_name: ag-sdr-live
-    platform: linux/amd64
-    privileged: true
-    ipc: host                  
-    shm_size: '512m'           
-    ulimits:                   
-      rtprio: 99
-      memlock: -1
     volumes:
-      - /dev/bus/usb:/dev/bus/usb
       - ./shared-data:/app/shared
+    environment:
+      - SDR_MODE=${SDR_MODE:-live}
+      - SDR_RELAY_HOST=${SDR_RELAY_HOST:-host.docker.internal}
+      - SDR_RELAY_DATA_PORT=${SDR_RELAY_DATA_PORT:-7373}
+      - SDR_RELAY_CTRL_PORT=${SDR_RELAY_CTRL_PORT:-7374}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  
     depends_on:
-      - ag-redis
+      ag-redis:                           # <--- Updated!
+        condition: service_healthy
     networks:
       - aetherguard_net
-    command: /bin/sh -c "/opt/sdrplay_api/sdrplay_apiService & sleep 2 && ./build/sdr_daemon"
 
 networks:
   aetherguard_net:
