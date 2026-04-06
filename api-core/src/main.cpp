@@ -93,6 +93,44 @@ crow::response makeCorsResponse(crow::json::wvalue body, int code = 200) {
     return res;
 }
 
+// 1. Add the missing getEnvVar function near the top of your file (above callOpenAI)
+std::string getEnvVar(std::string key) {
+    char * val = getenv(key.c_str());
+    return val == NULL ? std::string("") : std::string(val);
+}
+
+// 2. Helper for cURL
+static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
+    size_t totalSize = size * nmemb;
+    userp->append((char*)contents, totalSize);
+    return totalSize;
+}
+
+// 3. Helper function to send the payload to OpenAI
+std::string callOpenAI(const crow::json::wvalue& payload, const std::string& apiKey) {
+    CURL* curl = curl_easy_init();
+    std::string responseString;
+    if (curl) {
+        struct curl_slist* headers = NULL;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        headers = curl_slist_append(headers, ("Authorization: Bearer " + apiKey).c_str());
+
+        std::string payloadStr = payload.dump();
+
+        curl_easy_setopt(curl, CURLOPT_URL, "https://api.openai.com/v1/chat/completions");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payloadStr.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseString);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+
+        curl_easy_perform(curl);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+    }
+    return responseString;
+}
+
 int main() {
     crow::SimpleApp app;
     curl_global_init(CURL_GLOBAL_ALL);
@@ -288,6 +326,162 @@ CROW_ROUTE(app, "/api/search")
             }
         }
         return makeCorsResponse(res); 
+    });
+
+    CROW_ROUTE(app, "/api/agent/chat").methods(crow::HTTPMethod::Post)
+    ([](const crow::request& req) {
+        auto body = crow::json::load(req.body);
+        if (!body) return makeCorsResponse({{"error", "Invalid JSON"}});
+
+        std::string apiKey = getEnvVar("OPENAI_API_KEY"); 
+        if (apiKey.empty()) return makeCorsResponse({{"error", "OpenAI API key missing"}});
+
+        // --- 1. Construct Initial Payload ---
+        crow::json::wvalue payload;
+        payload["model"] = "gpt-4o-mini";
+        
+        // Build Tools Safely (Now using 'searchDatabase' mapped to advancedSearch)
+        crow::json::wvalue::list tools;
+        crow::json::wvalue tool;
+        tool["type"] = "function";
+        
+        crow::json::wvalue funcObj;
+        funcObj["name"] = "searchDatabase";
+        funcObj["description"] = "Search the intercepted radio database by frequency or keyword. Use this to find any requested logs.";
+        
+        crow::json::wvalue paramsObj;
+        paramsObj["type"] = "object";
+        
+        crow::json::wvalue propsObj;
+        
+        crow::json::wvalue freqObj; 
+        freqObj["type"] = "string"; 
+        freqObj["description"] = "Frequency in MHz (e.g. '154.280')";
+        propsObj["freq"] = std::move(freqObj);
+        
+        crow::json::wvalue keywordObj; 
+        keywordObj["type"] = "string"; 
+        keywordObj["description"] = "Keyword to search in summaries or raw text";
+        propsObj["keyword"] = std::move(keywordObj);
+        
+        paramsObj["properties"] = std::move(propsObj);
+        funcObj["parameters"] = std::move(paramsObj);
+        tool["function"] = std::move(funcObj);
+        tools.push_back(std::move(tool));
+        
+        payload["tools"] = std::move(tools);
+        payload["tool_choice"] = "auto";
+
+        // Build Messages Safely
+        crow::json::wvalue::list messages;
+        crow::json::wvalue sysMsg;
+        sysMsg["role"] = "system";
+        sysMsg["content"] = "You are the AetherGuard Database Agent, a strict, highly analytical radio intelligence assistant. Your SOLE purpose is to query the SQLite database to answer questions about intercepted radio transmissions. \n\nCRITICAL RULE: You are completely forbidden from answering general knowledge questions, giving lifestyle advice, or discussing topics outside the AetherGuard database. If a user asks an unrelated question (e.g., restaurants, weather, general trivia) or a question you cannot answer using your database search tools, do not use your general knowledge. You MUST reply exactly with: 'This query is outside my operational scope. I can only provide intelligence based on intercepted radio logs.'";        messages.push_back(std::move(sysMsg));
+
+        for (const auto& msg : body["messages"]) {
+            crow::json::wvalue m;
+            m["role"] = msg["role"].s();
+            m["content"] = msg["content"].s();
+            messages.push_back(std::move(m));
+        }
+
+        payload["messages"] = std::move(messages);
+
+        // --- 2. Execute First Call ---
+        std::string firstResponse = callOpenAI(payload, apiKey);
+        auto firstResJson = crow::json::load(firstResponse);
+
+        if (!firstResJson || !firstResJson.has("choices")) {
+            return makeCorsResponse({{"answer", "Error: OpenAI API failure."}});
+        }
+
+        auto messageNode = firstResJson["choices"][0]["message"];
+
+        // --- 3. Handle Tool Calls ---
+        if (messageNode.has("tool_calls")) {
+            crow::json::wvalue payload2;
+            payload2["model"] = "gpt-4o-mini";
+            
+            crow::json::wvalue::list messages2;
+            
+            crow::json::wvalue sysMsg2;
+            sysMsg2["role"] = "system";
+            sysMsg2["content"] = "You are the AetherGuard Database Agent, a strict, highly analytical radio intelligence assistant. Your SOLE purpose is to query the SQLite database to answer questions about intercepted radio transmissions. \n\nCRITICAL RULE: You are completely forbidden from answering general knowledge questions, giving lifestyle advice, or discussing topics outside the AetherGuard database. If a user asks an unrelated question (e.g., restaurants, weather, general trivia) or a question you cannot answer using your database search tools, do not use your general knowledge. You MUST reply exactly with: 'This query is outside my operational scope. I can only provide intelligence based on intercepted radio logs.'";            messages2.push_back(std::move(sysMsg2));
+
+            for (const auto& msg : body["messages"]) {
+                crow::json::wvalue m;
+                m["role"] = msg["role"].s();
+                m["content"] = msg["content"].s();
+                messages2.push_back(std::move(m));
+            }
+
+            crow::json::wvalue assistantMsg;
+            assistantMsg["role"] = "assistant";
+            crow::json::wvalue::list tCalls;
+            
+            for (const auto& tc : messageNode["tool_calls"]) {
+                crow::json::wvalue tCall;
+                tCall["id"] = tc["id"].s();
+                tCall["type"] = tc["type"].s();
+                tCall["function"]["name"] = tc["function"]["name"].s();
+                tCall["function"]["arguments"] = tc["function"]["arguments"].s();
+                tCalls.push_back(std::move(tCall));
+            }
+            assistantMsg["tool_calls"] = std::move(tCalls);
+            messages2.push_back(std::move(assistantMsg));
+
+            for (const auto& tc : messageNode["tool_calls"]) {
+                std::string toolId = tc["id"].s();
+                std::string funcName = tc["function"]["name"].s();
+                std::string argsStr = tc["function"]["arguments"].s();
+                auto args = crow::json::load(argsStr);
+
+                std::string dbResultText = "No results found.";
+
+                // Upgraded to use your powerful advancedSearch function
+                if (funcName == "searchDatabase" || funcName == "searchDatabaseKeywords") {
+                    std::string freq = "";
+                    if (args.has("freq")) freq = std::string(args["freq"].s());
+                    
+                    std::string keyword = "";
+                    if (args.has("keyword")) keyword = std::string(args["keyword"].s());
+                    
+                    std::vector<RadioLog> logs = advancedSearch(freq, "", keyword, "", "");
+                    
+                    if (!logs.empty()) {
+                        dbResultText = "Found " + std::to_string(logs.size()) + " logs:\n";
+                        int count = 0;
+                        for (const auto& log : logs) {
+                            if (count++ >= 10) break; // Token limit protection
+                            dbResultText += "- [" + std::to_string(log.time) + "] " + log.channelName + " (" + std::to_string(log.freq) + " MHz): " + log.summary + "\n";
+                        }
+                    }
+                }
+
+                crow::json::wvalue toolResultMsg;
+                toolResultMsg["role"] = "tool";
+                toolResultMsg["tool_call_id"] = toolId;
+                toolResultMsg["content"] = dbResultText;
+                messages2.push_back(std::move(toolResultMsg));
+            }
+
+            payload2["messages"] = std::move(messages2);
+
+            // --- 4. Final Call to OpenAI ---
+            std::string finalResponse = callOpenAI(payload2, apiKey);
+            auto finalResJson = crow::json::load(finalResponse);
+            
+            if (!finalResJson || !finalResJson.has("choices")) {
+                return makeCorsResponse({{"answer", "Error: OpenAI second API failure."}});
+            }
+            
+            std::string finalAnswer = finalResJson["choices"][0]["message"]["content"].s();
+            return makeCorsResponse({{"answer", finalAnswer}});
+        }
+
+        // If no tools were used, return standard text
+        std::string directAnswer = messageNode["content"].s();
+        return makeCorsResponse({{"answer", directAnswer}});
     });
 
     // Dev utility route to populate database with dummy data for testing 

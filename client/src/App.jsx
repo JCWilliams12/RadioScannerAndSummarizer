@@ -221,6 +221,46 @@ function App() {
   // Scanner State
   const [isScanningBand, setIsScanningBand] = useState(false);
 
+  const [isAgentOpen, setIsAgentOpen] = useState(false);
+  const [agentMessages, setAgentMessages] = useState([]);
+  const [agentInput, setAgentInput] = useState("");
+  const [isAgentThinking, setIsAgentThinking] = useState(false);
+
+  const handleAgentSubmit = async (e) => {
+    e.preventDefault();
+    if (!agentInput.trim() || isAgentThinking) return;
+
+    const userText = agentInput.trim();
+    setAgentInput("");
+    setIsAgentThinking(true);
+
+    // Keep only the last 2 interactions (4 messages) to save tokens
+    const recentHistory = agentMessages.slice(-4);
+    const newMessages = [...recentHistory, { role: "user", content: userText }];
+    
+    // Optimistically update UI
+    setAgentMessages([...agentMessages, { role: "user", content: userText }]);
+
+    try {
+      const res = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: newMessages })
+      });
+      const data = await res.json();
+      
+      if (data.answer) {
+        setAgentMessages(prev => [...prev, { role: "assistant", content: data.answer }]);
+      } else {
+        setAgentMessages(prev => [...prev, { role: "assistant", content: "Error: Agent failed to respond." }]);
+      }
+    } catch (err) {
+      setAgentMessages(prev => [...prev, { role: "assistant", content: "Connection error." }]);
+    } finally {
+      setIsAgentThinking(false);
+    }
+  };
+
   const formatTime = (timeInSeconds) => {
     if (isNaN(timeInSeconds)) return "00:00";
     const m = Math.floor(timeInSeconds / 60).toString().padStart(2, '0');
@@ -885,6 +925,65 @@ function App() {
           <div className="button-container">
             <button className="back-btn" onClick={resetView}>Back to Home</button>
           </div>
+        </div>
+      )}
+
+      {/* FLOATING AGENT WIDGET */}
+      {view === 'database' && (
+        <div style={{
+          position: 'fixed', bottom: '20px', right: '20px', width: '350px',
+          backgroundColor: '#001a33', border: '1px solid #004080', borderRadius: '8px',
+          boxShadow: '0 8px 16px rgba(0,0,0,0.5)', zIndex: 1000,
+          display: 'flex', flexDirection: 'column', overflow: 'hidden'
+        }}>
+          {/* Header (Click to toggle) */}
+          <div 
+            onClick={() => setIsAgentOpen(!isAgentOpen)}
+            style={{ padding: '10px 15px', backgroundColor: '#002b5e', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 'bold' }}
+          >
+            <span>AetherGuard Agent</span>
+            <span>{isAgentOpen ? '▼' : '▲'}</span>
+          </div>
+
+          {/* Body */}
+          {isAgentOpen && (
+            <div style={{ height: '350px', display: 'flex', flexDirection: 'column' }}>
+              {!useOpenAI ? (
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8cb4d5', padding: '20px', textAlign: 'center' }}>
+                  Database agent disabled for local model. Switch to OpenAI to enable.
+                </div>
+              ) : (
+                <>
+                  <div style={{ flex: 1, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {agentMessages.length === 0 && (
+                      <div style={{ color: '#5a8aad', fontSize: '0.85em', textAlign: 'center' }}>Ask me about the database records.</div>
+                    )}
+                    {agentMessages.map((msg, idx) => (
+                      <div key={idx} style={{ alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', backgroundColor: msg.role === 'user' ? '#004080' : 'rgba(255,255,255,0.05)', padding: '8px 12px', borderRadius: '6px', maxWidth: '85%', fontSize: '0.9em', color: 'white' }}>
+                        {msg.content}
+                      </div>
+                    ))}
+                    {isAgentThinking && (
+                      <div style={{ alignSelf: 'flex-start', color: '#8cb4d5', fontSize: '0.85em', fontStyle: 'italic' }}>Agent is thinking...</div>
+                    )}
+                  </div>
+                  <form onSubmit={handleAgentSubmit} style={{ display: 'flex', padding: '10px', borderTop: '1px solid #004080', backgroundColor: 'rgba(0,0,0,0.2)' }}>
+                    <input 
+                      type="text" 
+                      value={agentInput} 
+                      onChange={(e) => setAgentInput(e.target.value)} 
+                      placeholder="Search the logs..." 
+                      style={{ flex: 1, padding: '8px', borderRadius: '4px', border: '1px solid #333', backgroundColor: '#001a33', color: 'white' }}
+                      disabled={isAgentThinking}
+                    />
+                    <button type="submit" disabled={isAgentThinking} style={{ marginLeft: '8px', padding: '8px 12px', backgroundColor: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: isAgentThinking ? 'not-allowed' : 'pointer' }}>
+                      Send
+                    </button>
+                  </form>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
 

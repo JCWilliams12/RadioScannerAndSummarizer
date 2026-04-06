@@ -12,6 +12,7 @@ std::string getEnvVar(std::string key) {
     return val == NULL ? std::string("") : std::string(val);
 }
 
+
 int main() {
     std::cout << "[AI Worker] Online and waiting..." << std::endl;
     redisContext *c = redisConnect("ag-redis", 6379);
