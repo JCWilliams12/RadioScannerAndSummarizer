@@ -483,19 +483,109 @@ void commandListener(SdrHandler* sdr) {
     redisFree(c);
 }
 
+// =======================================================
+// MOCK MODE ROUTER (NO HARDWARE FALLBACK)
+// =======================================================
+void runMockMode() {
+    redisContext *sub = redisConnect("ag-redis", 6379);
+    redisContext *pub = redisConnect("ag-redis", 6379);
+
+    if (!sub || sub->err || !pub || pub->err) {
+        std::cerr << "[Mock SDR] Failed to connect to Redis." << std::endl;
+        return;
+    }
+
+    redisReply *reply = (redisReply*)redisCommand(sub, "SUBSCRIBE sdr_commands");
+    if (reply) freeReplyObject(reply);
+
+    std::cout << "[Mock SDR] Listening for commands..." << std::endl;
+
+    while (redisGetReply(sub, (void**)&reply) == REDIS_OK) {
+        if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
+            auto json = crow::json::load(reply->element[2]->str);
+            if (!json) continue;
+
+            std::string cmd = json["command"].s();
+
+            if (cmd == "TUNE") {
+                double freq = json["freq"].d();
+                std::cout << "[Mock SDR] Tuning to " << freq << " MHz (Simulated)" << std::endl;
+            }
+            else if (cmd == "RECORD") {
+                double targetFreq = json["freq"].d();
+                std::cout << "[Mock SDR] Recording " << targetFreq << " MHz (Simulating 3 seconds)..." << std::endl;
+                
+                // Simulate recording delay
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+
+                // Copy dummy file into the hot seat for the AI worker
+                std::system("cp /app/shared/audio/dummy.wav /app/shared/audio/audio.wav");
+
+                crow::json::wvalue msg;
+                msg["event"] = "record_complete";
+                msg["freq"] = targetFreq;
+                msg["file"] = "/app/shared/audio/audio.wav";
+                
+                std::cout << "[Mock SDR] Record complete. Alerting AI Worker." << std::endl;
+                redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
+            }
+            else if (cmd == "SCAN") {
+                std::cout << "[Mock SDR] Sweeping spectrum (Simulating 4 seconds)..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(4));
+
+                crow::json::wvalue msg;
+                msg["event"] = "scan_complete";
+                msg["stations"][0]["freq"] = 154.280;
+                msg["stations"][0]["name"] = "Mock Police Dispatch";
+                msg["stations"][1]["freq"] = 462.562;
+                msg["stations"][1]["name"] = "Mock Fast Food";
+                msg["stations"][2]["freq"] = 162.550;
+                msg["stations"][2]["name"] = "Mock NOAA Weather";
+
+                std::cout << "[Mock SDR] Sweep complete. Sending mock stations to React." << std::endl;
+                redisCommand(pub, "PUBLISH ws_updates %s", msg.dump().c_str());
+            }
+        }
+        if (reply) freeReplyObject(reply);
+    }
+}
+
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
+<<<<<<< HEAD
 
     g_redis_pub = redisConnect("ag-redis", 6379);
 
     std::thread(dspWorker).detach();
     std::thread(redisPublishWorker).detach();
 
+=======
+    g_redis_pub = redisConnect("ag-redis", 6379);
+    
+    std::cout << "[SDR] Attempting to initialize hardware..." << std::endl;
+>>>>>>> 1e5ab748bb8441ba63521c633fa58c18256b0cbf
     SdrHandler sdr;
-    if (!sdr.InitializeAPI()) return 1;
-    if (!sdr.StartStream(88000000.0)) return 1;
 
+<<<<<<< HEAD
     std::cout << "[SDR] Docker Microservice Active. Pipeline Ready." << std::endl;
+=======
+    // IF HARDWARE FAILS -> BOOT INTO MOCK MODE
+    if (!sdr.InitializeAPI()) {
+        std::cout << "[WARNING] No SDRplay devices found!" << std::endl;
+        std::cout << "[WARNING] Booting into MOCK MODE for UI/AI testing." << std::endl;
+        runMockMode();
+        return 0; // Exit cleanly when Mock Mode shuts down
+    }
+
+    // IF HARDWARE SUCCEEDS -> BOOT INTO LIVE MODE
+    if (!sdr.StartStream(88000000.0)) {
+        std::cerr << "[SDR] Failed to start stream." << std::endl;
+        return 1;
+    }
+
+    std::cout << "[SDR] Hardware found! Docker Microservice Active." << std::endl;
+    std::thread(dspWorker).detach(); // Start DSP only if hardware is live
+>>>>>>> 1e5ab748bb8441ba63521c633fa58c18256b0cbf
     commandListener(&sdr);
 
     return 0;

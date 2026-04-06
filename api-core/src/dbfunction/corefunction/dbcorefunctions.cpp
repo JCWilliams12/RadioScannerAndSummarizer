@@ -146,7 +146,6 @@ std::vector<RadioLog> getAllLogs() {
 }
 
 // -=- 4. REMOVE ROW -=-
-// Deletes a specific log based on its unique Composite Key (Freq + Time + Location)
 int removeLog(double freq, long long time, std::string location) {
     sqlite3 *db;
     sqlite3_stmt *stmt;
@@ -158,8 +157,8 @@ int removeLog(double freq, long long time, std::string location) {
         return 0;
     }
 
-    // Now matching all three parts of the composite key
-    const char *sql = "DELETE FROM RadioLogs WHERE ROUND(freq, 3) = ROUND(?, 3) AND time = ? AND location = ?;";
+    // Using ABS for safe floating-point comparison instead of ROUND
+    const char *sql = "DELETE FROM RadioLogs WHERE ABS(freq - ?) < 0.005 AND time = ? AND location = ?;";
         
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
 
@@ -171,23 +170,25 @@ int removeLog(double freq, long long time, std::string location) {
 
     sqlite3_bind_double(stmt, 1, freq);
     sqlite3_bind_int64(stmt, 2, time);
-    sqlite3_bind_text(stmt, 3, location.c_str(), -1, SQLITE_STATIC);
+    // CRITICAL FIX: Use SQLITE_TRANSIENT so SQLite safely copies the string
+    sqlite3_bind_text(stmt, 3, location.c_str(), -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(stmt);
+    int changes = sqlite3_changes(db); // Check how many rows were actually deleted
 
     if (rc != SQLITE_DONE) {
         fprintf(stderr, "Delete failed: %s\n", sqlite3_errmsg(db));
     } else {
-        if (sqlite3_changes(db) > 0) {
-            std::cout << "✅ SUCCESS: Deleted log: " << freq << "MHz at " << time << " in " << location << std::endl;
+        if (changes > 0) {
+            std::cout << "✅ SUCCESS: Deleted log: " << freq << "MHz at " << time << std::endl;
         } else {
-            std::cout << "❌ FAILED: No exact match found to delete." << std::endl;
+            std::cout << "❌ FAILED: No exact match found to delete. (Freq: " << freq << ", Time: " << time << ")" << std::endl;
         }
     }
 
     sqlite3_finalize(stmt);
     sqlite3_close(db);
-    return 1; 
+    return changes > 0 ? 1 : 0; 
 }
 
 // -=- 5. OPEN DATABASE CHECK -=-

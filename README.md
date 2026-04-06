@@ -21,11 +21,19 @@ wget https://github.com/CrowCpp/Crow/releases/download/v1.2.0/crow_all.h -O crow
 sudo apt-get install -y libboost-all-dev
 
 
+-=-=-=-=-=-=-Docker Run-=-=-=-=-=-=-=-=-=-
+docker-compose up --build 
+
+
 
 -=-=-=-=-=-=-Run Front End-=-=-=-=-=-=-=-=-=-
 Paste the following into terminal: 
 cd client
 npm install
 npm run dev
+<<<<<<< HEAD
 
 usbipd attach --wsl --busid <BUSID>
+=======
+git 
+>>>>>>> 1e5ab748bb8441ba63521c633fa58c18256b0cbf
