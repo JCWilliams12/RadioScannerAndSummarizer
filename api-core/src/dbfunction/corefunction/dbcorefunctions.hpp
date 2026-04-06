@@ -15,7 +15,7 @@ struct RadioLog {
 };
 
 bool createTable();
-void insertLog(double freq, long long time, std::string location, std::string rawT, std::string summary, std::string channelName);
+void insertLog(double freq, long long time, std::string location, std::string rawT, std::string summary, std::string channelName, std::string audioFilePath);
 int removeLog(double freq, long long time, std::string location);
 void openDatabase();
 

@@ -13,5 +13,6 @@ std::vector<RadioLog> filterByLocation(const std::string& loc);
 std::vector<RadioLog> filterByChannelName(const std::string& channel);
 std::vector<RadioLog> filterByTimeRange(long long startTimestamp, long long endTimestamp);
 std::vector<RadioLog> searchDatabaseKeywords(const std::string& keyword, int limit);
+std::vector<RadioLog> advancedSearch(const std::string& freqStr, const std::string& loc, const std::string& keyword, const std::string& startStr, const std::string& endStr);
 
 #endif

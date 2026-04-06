@@ -174,3 +174,61 @@ std::vector<RadioLog> searchDatabaseKeywords(const std::string& keyword, int lim
     sqlite3_close(db);
     return results;
 }
+
+std::vector<RadioLog> advancedSearch(const std::string& freqStr, const std::string& loc, const std::string& keyword, const std::string& startStr, const std::string& endStr) {
+    std::lock_guard<std::mutex> lock(db_mtx);
+    sqlite3 *db;
+    sqlite3_stmt *stmt;
+    std::vector<RadioLog> results;
+
+    if (sqlite3_open(DB_NAME, &db) != SQLITE_OK) return results;
+
+    // Base query
+    std::string sql = "SELECT freq, time, location, rawT, summary, channelName, audioFilePath FROM RadioLogs WHERE 1=1";
+
+    // Dynamically append AND clauses
+    if (!freqStr.empty()) sql += " AND ABS(freq - ?) < 0.005";
+    if (!loc.empty()) sql += " AND location LIKE ?";
+    if (!keyword.empty()) sql += " AND (summary LIKE ? OR rawT LIKE ? OR channelName LIKE ?)";
+    if (!startStr.empty() && !endStr.empty()) sql += " AND time BETWEEN ? AND ?";
+
+    sql += " ORDER BY time DESC;";
+
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, 0) == SQLITE_OK) {
+        int bindIdx = 1;
+
+        // Bind provided variables in exact order
+        if (!freqStr.empty()) {
+            sqlite3_bind_double(stmt, bindIdx++, std::stod(freqStr));
+        }
+        
+        std::string locQuery;
+        if (!loc.empty()) {
+            locQuery = "%" + loc + "%";
+            sqlite3_bind_text(stmt, bindIdx++, locQuery.c_str(), -1, SQLITE_TRANSIENT);
+        }
+        
+        std::string keyQuery;
+        if (!keyword.empty()) {
+            keyQuery = "%" + keyword + "%";
+            sqlite3_bind_text(stmt, bindIdx++, keyQuery.c_str(), -1, SQLITE_TRANSIENT); // summary
+            sqlite3_bind_text(stmt, bindIdx++, keyQuery.c_str(), -1, SQLITE_TRANSIENT); // rawT
+            sqlite3_bind_text(stmt, bindIdx++, keyQuery.c_str(), -1, SQLITE_TRANSIENT); // channelName
+        }
+        
+        if (!startStr.empty() && !endStr.empty()) {
+            sqlite3_bind_int64(stmt, bindIdx++, std::stoll(startStr));
+            sqlite3_bind_int64(stmt, bindIdx++, std::stoll(endStr));
+        }
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            results.push_back(populateLogFromStmt(stmt));
+        }
+    } else {
+        std::cerr << "Advanced Search SQL Error: " << sqlite3_errmsg(db) << std::endl;
+    }
+    
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return results;
+}

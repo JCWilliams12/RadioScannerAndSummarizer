@@ -34,10 +34,10 @@ void seedDatabase() {
     sqlite3 *db;
     if (sqlite3_open(DB_NAME, &db) == SQLITE_OK) {
         const char* sql = 
-            "INSERT INTO RadioLogs (freq, time, location, rawT, summary, channelName) VALUES "
-            "(154.280, strftime('%s', 'now'), 'North Precinct', 'Officer needs assistance.', 'Officer request', 'Bham Police 1'),"
-            "(462.562, strftime('%s', 'now', '-5 minutes'), 'Greystone', 'Order is ready at window two.', 'Drive-thru comms', 'Fast Food Ops'),"
-            "(160.230, strftime('%s', 'now', '-1 hour'), 'Rail Yard', 'Train 42 is cleared on track 3.', 'Train clearance', 'Railroad Ch 1');";
+            "INSERT INTO RadioLogs (freq, time, location, rawT, summary, channelName, audioFilePath) VALUES "
+            "(154.280, strftime('%s', 'now'), 'North Precinct', 'Officer needs assistance.', 'Officer request', 'Bham Police 1', '/api/audio/audio.wav'),"
+            "(462.562, strftime('%s', 'now', '-5 minutes'), 'Greystone', 'Order is ready at window two.', 'Drive-thru comms', 'Fast Food Ops', '/api/audio/audio.wav'),"
+            "(160.230, strftime('%s', 'now', '-1 hour'), 'Rail Yard', 'Train 42 is cleared on track 3.', 'Train clearance', 'Railroad Ch 1', '/api/audio/audio.wav');";
         
         char* errMsg = nullptr;
         if (sqlite3_exec(db, sql, 0, 0, &errMsg) != SQLITE_OK) {
@@ -210,9 +210,13 @@ int main() {
         if (logs.empty()) res = crow::json::wvalue::list();
         else {
             for (size_t i = 0; i < logs.size(); i++) {
-                res[i]["freq"] = std::to_string(logs[i].freq); res[i]["time"] = logs[i].time;
-                res[i]["location"] = logs[i].location; res[i]["name"] = logs[i].channelName;
-                res[i]["summary"] = logs[i].summary; res[i]["rawT"] = logs[i].rawT;
+                res[i]["freq"] = logs[i].freq; 
+                res[i]["time"] = logs[i].time;
+                res[i]["location"] = logs[i].location; 
+                res[i]["name"] = logs[i].channelName;
+                res[i]["summary"] = logs[i].summary; 
+                res[i]["rawT"] = logs[i].rawT;
+                res[i]["audioFilePath"] = logs[i].audioFilePath; 
             }
         }
         return makeCorsResponse(res);
@@ -322,10 +326,39 @@ CROW_ROUTE(app, "/api/search")
         std::string rawT = body["rawT"].s();
         std::string summary = body["summary"].s();
         std::string channelName = body["channelName"].s();
+        
+        // FIX ME!!!! DANIEL PLEASE I DONT WANT TO
+        std::string audioFilePath = "/api/audio/audio.wav";
 
-        insertLog(freq, time, location, rawT, summary, channelName);
+        insertLog(freq, time, location, rawT, summary, channelName, audioFilePath);
         
         return makeCorsResponse({{"status", "success"}});
+    });
+
+    CROW_ROUTE(app, "/api/search/advanced")
+    ([](const crow::request& req) {
+        std::string freq = req.url_params.get("freq") ? req.url_params.get("freq") : "";
+        std::string loc = req.url_params.get("loc") ? req.url_params.get("loc") : "";
+        std::string keyword = req.url_params.get("keyword") ? req.url_params.get("keyword") : "";
+        std::string startStr = req.url_params.get("start") ? req.url_params.get("start") : "";
+        std::string endStr = req.url_params.get("end") ? req.url_params.get("end") : "";
+
+        std::vector<RadioLog> logs = advancedSearch(freq, loc, keyword, startStr, endStr);
+        
+        crow::json::wvalue res;
+        if (logs.empty()) res = crow::json::wvalue::list();
+        else {
+            for (size_t i = 0; i < logs.size(); i++) {
+                res[i]["freq"] = logs[i].freq; 
+                res[i]["time"] = logs[i].time;
+                res[i]["location"] = logs[i].location; 
+                res[i]["rawT"] = logs[i].rawT;
+                res[i]["summary"] = logs[i].summary; 
+                res[i]["name"] = logs[i].channelName;
+                res[i]["audioFilePath"] = logs[i].audioFilePath;
+            }
+        }
+        return makeCorsResponse(res); 
     });
 
     // Dev utility rout that completely wipes all records from RadioLogs DB table 
@@ -333,10 +366,12 @@ CROW_ROUTE(app, "/api/search")
     ([]() {
         sqlite3 *db;
         if (sqlite3_open(DB_NAME, &db) == SQLITE_OK) {
-            sqlite3_exec(db, "DELETE FROM RadioLogs;", 0, 0, 0);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS RadioLogs;", 0, 0, 0);
             sqlite3_close(db);
+            
+            createTable(); 
         }
-        return makeCorsResponse({{"status", "database_wiped_clean"}});
+        return makeCorsResponse({{"status", "database_wiped_and_recreated"}});
     });
 
     // Publishes command to AI owrker to transcribe an audio file using the whisper.cpp
