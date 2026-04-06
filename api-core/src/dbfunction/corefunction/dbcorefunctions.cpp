@@ -23,7 +23,7 @@ bool createTable() {
         return false;
     }
 
-    // Schema: freq, time, location, rawT, summary, channelName
+    // Schema: freq, time, location, rawT, summary, channelName, audioFilePath
     // Composite Primary Key: freq, time, location
     const char *sql = 
         "CREATE TABLE IF NOT EXISTS RadioLogs (" \
@@ -33,6 +33,7 @@ bool createTable() {
         "rawT TEXT, " \
         "summary TEXT, " \
         "channelName TEXT, " \
+        "audioFilePath TEXT, " \
         "PRIMARY KEY (freq, time, location));";
 
     rc = sqlite3_exec(db, sql, 0, 0, &zErrMsg);
@@ -49,7 +50,7 @@ bool createTable() {
 }
 
 // Uses "INSERT OR REPLACE" to update existing logs that match the primary key
-void insertLog(double freq, long long time, std::string location, std::string rawT, std::string summary, std::string channelName) {
+void insertLog(double freq, long long time, std::string location, std::string rawT, std::string summary, std::string channelName, std::string audioFilePath) {
     sqlite3 *db;
     sqlite3_stmt *stmt;
     int rc;
@@ -60,7 +61,7 @@ void insertLog(double freq, long long time, std::string location, std::string ra
         return;
     }
 
-    const char *sql = "INSERT OR REPLACE INTO RadioLogs (freq, time, location, rawT, summary, channelName) VALUES (?, ?, ?, ?, ?, ?);";
+    const char *sql = "INSERT OR REPLACE INTO RadioLogs (freq, time, location, rawT, summary, channelName, audioFilePath) VALUES (?, ?, ?, ?, ?, ?, ?);";
 
     // Prepare the statement
     rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
@@ -77,6 +78,7 @@ void insertLog(double freq, long long time, std::string location, std::string ra
     sqlite3_bind_text(stmt, 4, rawT.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 5, summary.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 6, channelName.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 7, audioFilePath.c_str(), -1, SQLITE_STATIC);
 
     // Execute
     rc = sqlite3_step(stmt);
@@ -101,7 +103,7 @@ std::vector<RadioLog> getAllLogs() {
         return logs;
     }
 
-    const char *sql = "SELECT freq, time, location, rawT, summary, channelName FROM RadioLogs ORDER BY time DESC;";
+    const char *sql = "SELECT freq, time, location, rawT, summary, channelName, audioFilePath FROM RadioLogs ORDER BY time DESC;";
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
         std::cerr << "SQL error: " << sqlite3_errmsg(db) << std::endl;
@@ -127,6 +129,9 @@ std::vector<RadioLog> getAllLogs() {
 
         const unsigned char* cName = sqlite3_column_text(stmt, 5);
         log.channelName = cName ? reinterpret_cast<const char*>(cName) : "";
+
+        const unsigned char* aPath = sqlite3_column_text(stmt, 6);
+        log.audioFilePath = aPath ? reinterpret_cast<const char*>(aPath) : "";
 
         std::cout << "Found: " << log.channelName << " | " << log.freq << " MHz" << std::endl;
 
@@ -172,9 +177,9 @@ int removeLog(double freq, long long time, std::string location) {
         fprintf(stderr, "Delete failed: %s\n", sqlite3_errmsg(db));
     } else {
         if (changes > 0) {
-            std::cout << "✅ SUCCESS: Deleted log: " << freq << "MHz at " << time << std::endl;
+            std::cout << "SUCCESS: Deleted log: " << freq << "MHz at " << time << std::endl;
         } else {
-            std::cout << "❌ FAILED: No exact match found to delete. (Freq: " << freq << ", Time: " << time << ")" << std::endl;
+            std::cout << "FAILED: No exact match found to delete. (Freq: " << freq << ", Time: " << time << ")" << std::endl;
         }
     }
 

@@ -11,6 +11,7 @@ struct RadioLog {
     std::string rawT;
     std::string summary;
     std::string channelName;
+    std::string audioFilePath;
 };
 
 bool createTable();
