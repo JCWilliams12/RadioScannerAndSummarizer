@@ -182,11 +182,14 @@ function App() {
   const [selectedLog, setSelectedLog] = useState(null);
   const [logs, setLogs] = useState([]);
 
-  // State for search term
-  const [searchTerm, setSearchTerm] = useState("");
-
-  // State that tracks whether a search is active.
+  // --- Advanced Filtering State ---
+  const [showFilters, setShowFilters] = useState(false);
   const [isSearchActive, setIsSearchActive] = useState(false);
+  const [filterFreq, setFilterFreq] = useState("");
+  const [filterLoc, setFilterLoc] = useState("");
+  const [filterKeyword, setFilterKeyword] = useState("");
+  const [filterStart, setFilterStart] = useState("");
+  const [filterEnd, setFilterEnd] = useState("");
 
   // --- Scan loading state ---
   const [isScanning, setIsScanning] = useState(false);
@@ -218,6 +221,46 @@ function App() {
   // Scanner State
   const [isScanningBand, setIsScanningBand] = useState(false);
 
+  const [isAgentOpen, setIsAgentOpen] = useState(false);
+  const [agentMessages, setAgentMessages] = useState([]);
+  const [agentInput, setAgentInput] = useState("");
+  const [isAgentThinking, setIsAgentThinking] = useState(false);
+
+  const handleAgentSubmit = async (e) => {
+    e.preventDefault();
+    if (!agentInput.trim() || isAgentThinking) return;
+
+    const userText = agentInput.trim();
+    setAgentInput("");
+    setIsAgentThinking(true);
+
+    // Keep only the last 2 interactions (4 messages) to save tokens
+    const recentHistory = agentMessages.slice(-4);
+    const newMessages = [...recentHistory, { role: "user", content: userText }];
+    
+    // Optimistically update UI
+    setAgentMessages([...agentMessages, { role: "user", content: userText }]);
+
+    try {
+      const res = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: newMessages })
+      });
+      const data = await res.json();
+      
+      if (data.answer) {
+        setAgentMessages(prev => [...prev, { role: "assistant", content: data.answer }]);
+      } else {
+        setAgentMessages(prev => [...prev, { role: "assistant", content: "Error: Agent failed to respond." }]);
+      }
+    } catch (err) {
+      setAgentMessages(prev => [...prev, { role: "assistant", content: "Connection error." }]);
+    } finally {
+      setIsAgentThinking(false);
+    }
+  };
+
   const formatTime = (timeInSeconds) => {
     if (isNaN(timeInSeconds)) return "00:00";
     const m = Math.floor(timeInSeconds / 60).toString().padStart(2, '0');
@@ -233,10 +276,14 @@ function App() {
       const data = await res.json();
       setLogs(data);
       setIsSearchActive(false);
-      setSearchTerm('');
+      clearFilterInputs();
     } catch (err) {
       console.error("Failed to fetch logs:", err);
     }
+  };
+
+  const clearFilterInputs = () => {
+    setFilterFreq(""); setFilterLoc(""); setFilterKeyword(""); setFilterStart(""); setFilterEnd("");
   };
 
   const fetchStations = async () => {
@@ -249,15 +296,30 @@ function App() {
     }
   };
 
-  const searchDatabase = async () => {
+  const executeAdvancedSearch = async () => {
     try {
-    // We send the 'searchTerm' variable to our C++ Crow server
-      const response = await fetch(`http://localhost:8080/api/search?q=${searchTerm}`);
+      const params = new URLSearchParams();
+      if (filterFreq) params.append('freq', filterFreq);
+      if (filterLoc) params.append('loc', filterLoc);
+      if (filterKeyword) params.append('keyword', filterKeyword);
+      
+      // Convert browser Local Time to Unix Epochs for the C++ backend
+      if (filterStart && filterEnd) {
+        const startUnix = Math.floor(new Date(filterStart).getTime() / 1000);
+        const endUnix = Math.floor(new Date(filterEnd).getTime() / 1000);
+        params.append('start', startUnix);
+        params.append('end', endUnix);
+      } else if (filterStart || filterEnd) {
+        alert("Please provide both a Start and End time for a date range search.");
+        return;
+      }
+
+      const response = await fetch(`http://localhost:8080/api/search/advanced?${params.toString()}`);
       const data = await response.json();
-      setLogs(data); // This will replace the logs list with the search results
+      setLogs(data); 
       setIsSearchActive(true);
     } catch (error) {
-      console.error("Failed to connect to C++ backend:", error);
+      console.error("Failed to fetch advanced search results:", error);
     }
   };
 
@@ -394,7 +456,9 @@ function App() {
     let objectUrl = "";
 
     if (showPlaybackMenu && selectedLog) {
-      fetch("/api/audio/audio.wav")
+      // Pull dynamic audio path if available, fallback to default
+      const fetchPath = selectedLog.audioFilePath || "/api/audio/audio.wav";
+      fetch(fetchPath)
         .then(res => res.blob())
         .then(blob => {
           objectUrl = URL.createObjectURL(blob);
@@ -677,18 +741,50 @@ function App() {
         <div className="database-view-wrapper">
           <div className="scanning-grid">
             <div className="data-box">
-              <div className="search-bar-container" style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '15px' }}>
-                <h3 style={{ borderBottom: 'none', paddingBottom: 0, margin: 0, whiteSpace: 'nowrap' }}>Saved Logs</h3>
-                <input type="text" placeholder="Search by freq..." className="search-input" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && searchDatabase()} />
-                {isSearchActive ? (
-                  <button className="back-btn" style={{ marginBottom: 0, padding: '8px 16px', backgroundColor: '#800000' }} onClick={fetchLogs}>Cancel</button>
-                  ) : (
-                  <button className="back-btn" style={{ marginBottom: 0, padding: '8px 16px' }} onClick={searchDatabase}>Search</button>)}
+              {/* ADVANCED FILTER HEADER */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <h3 style={{ margin: 0, borderBottom: 'none' }}>Saved Logs</h3>
+                <button 
+                  onClick={() => setShowFilters(!showFilters)}
+                  style={{ backgroundColor: 'transparent', color: '#8cb4d5', border: '1px solid #004080', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85em' }}
+                >
+                  {showFilters ? 'Hide Filters ▲' : 'Advanced Filters ▼'}
+                </button>
               </div>
+
+              {/* ADVANCED FILTER PANEL */}
+              {showFilters && (
+                <div style={{ backgroundColor: 'rgba(0,0,0,0.2)', padding: '10px', borderRadius: '6px', marginBottom: '15px', display: 'flex', flexDirection: 'column', gap: '8px', border: '1px solid #002b5e' }}>
+                  <input type="text" placeholder="Keyword (Search AI & Transcripts)" className="search-input" value={filterKeyword} onChange={(e) => setFilterKeyword(e.target.value)} />
+                  
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <input type="number" placeholder="Freq (MHz)" className="search-input" style={{ flex: 1 }} value={filterFreq} onChange={(e) => setFilterFreq(e.target.value)} />
+                    <input type="text" placeholder="Location" className="search-input" style={{ flex: 1 }} value={filterLoc} onChange={(e) => setFilterLoc(e.target.value)} />
+                  </div>
+                  
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+                      <label style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '2px' }}>Start Time</label>
+                      <input type="datetime-local" className="search-input" value={filterStart} onChange={(e) => setFilterStart(e.target.value)} />
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+                      <label style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '2px' }}>End Time</label>
+                      <input type="datetime-local" className="search-input" value={filterEnd} onChange={(e) => setFilterEnd(e.target.value)} />
+                    </div>
+                  </div>
+                  
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '5px' }}>
+                    {isSearchActive && (
+                      <button onClick={fetchLogs} style={{ backgroundColor: '#800000', color: 'white', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer' }}>Clear</button>
+                    )}
+                    <button onClick={executeAdvancedSearch} style={{ backgroundColor: '#004080', color: 'white', border: 'none', padding: '6px 16px', borderRadius: '4px', cursor: 'pointer' }}>Search DB</button>
+                  </div>
+                </div>
+              )}
               <ul className="frequency-list">
                 {logs.map(log => (
                   <li 
-                    key={log.id}
+                    key={`${log.freq}-${log.time}`}
                     onClick={() => setSelectedLog(log)}
                     className={selectedLog?.id === log.id ? "active-station" : ""}
                   >
@@ -829,6 +925,65 @@ function App() {
           <div className="button-container">
             <button className="back-btn" onClick={resetView}>Back to Home</button>
           </div>
+        </div>
+      )}
+
+      {/* FLOATING AGENT WIDGET */}
+      {view === 'database' && (
+        <div style={{
+          position: 'fixed', bottom: '20px', right: '20px', width: '350px',
+          backgroundColor: '#001a33', border: '1px solid #004080', borderRadius: '8px',
+          boxShadow: '0 8px 16px rgba(0,0,0,0.5)', zIndex: 1000,
+          display: 'flex', flexDirection: 'column', overflow: 'hidden'
+        }}>
+          {/* Header (Click to toggle) */}
+          <div 
+            onClick={() => setIsAgentOpen(!isAgentOpen)}
+            style={{ padding: '10px 15px', backgroundColor: '#002b5e', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 'bold' }}
+          >
+            <span>AetherGuard Agent</span>
+            <span>{isAgentOpen ? '▼' : '▲'}</span>
+          </div>
+
+          {/* Body */}
+          {isAgentOpen && (
+            <div style={{ height: '350px', display: 'flex', flexDirection: 'column' }}>
+              {!useOpenAI ? (
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8cb4d5', padding: '20px', textAlign: 'center' }}>
+                  Database agent disabled for local model. Switch to OpenAI to enable.
+                </div>
+              ) : (
+                <>
+                  <div style={{ flex: 1, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {agentMessages.length === 0 && (
+                      <div style={{ color: '#5a8aad', fontSize: '0.85em', textAlign: 'center' }}>Ask me about the database records.</div>
+                    )}
+                    {agentMessages.map((msg, idx) => (
+                      <div key={idx} style={{ alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', backgroundColor: msg.role === 'user' ? '#004080' : 'rgba(255,255,255,0.05)', padding: '8px 12px', borderRadius: '6px', maxWidth: '85%', fontSize: '0.9em', color: 'white' }}>
+                        {msg.content}
+                      </div>
+                    ))}
+                    {isAgentThinking && (
+                      <div style={{ alignSelf: 'flex-start', color: '#8cb4d5', fontSize: '0.85em', fontStyle: 'italic' }}>Agent is thinking...</div>
+                    )}
+                  </div>
+                  <form onSubmit={handleAgentSubmit} style={{ display: 'flex', padding: '10px', borderTop: '1px solid #004080', backgroundColor: 'rgba(0,0,0,0.2)' }}>
+                    <input 
+                      type="text" 
+                      value={agentInput} 
+                      onChange={(e) => setAgentInput(e.target.value)} 
+                      placeholder="Search the logs..." 
+                      style={{ flex: 1, padding: '8px', borderRadius: '4px', border: '1px solid #333', backgroundColor: '#001a33', color: 'white' }}
+                      disabled={isAgentThinking}
+                    />
+                    <button type="submit" disabled={isAgentThinking} style={{ marginLeft: '8px', padding: '8px 12px', backgroundColor: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: isAgentThinking ? 'not-allowed' : 'pointer' }}>
+                      Send
+                    </button>
+                  </form>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
 

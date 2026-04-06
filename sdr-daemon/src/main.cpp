@@ -869,6 +869,10 @@ void mockCommandListener() {
 
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
+<<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> d1503cad464ff592a7ee36479702b59cfe15fe71
 
     // Check mode: "mock" = no hardware, "live" (or unset) = real relay
     const char* sdr_mode_env = std::getenv("SDR_MODE");
@@ -876,6 +880,40 @@ int main() {
 
     // Connect to Redis (needed in both modes)
     g_redis_pub = redisConnect("ag-redis", 6379);
+<<<<<<< HEAD
+
+    std::thread(dspWorker).detach();
+    std::thread(redisPublishWorker).detach();
+
+=======
+    g_redis_pub = redisConnect("ag-redis", 6379);
+    
+    std::cout << "[SDR] Attempting to initialize hardware..." << std::endl;
+>>>>>>> 1e5ab748bb8441ba63521c633fa58c18256b0cbf
+    SdrHandler sdr;
+
+<<<<<<< HEAD
+    std::cout << "[SDR] Docker Microservice Active. Pipeline Ready." << std::endl;
+=======
+    // IF HARDWARE FAILS -> BOOT INTO MOCK MODE
+    if (!sdr.InitializeAPI()) {
+        std::cout << "[WARNING] No SDRplay devices found!" << std::endl;
+        std::cout << "[WARNING] Booting into MOCK MODE for UI/AI testing." << std::endl;
+        runMockMode();
+        return 0; // Exit cleanly when Mock Mode shuts down
+    }
+
+    // IF HARDWARE SUCCEEDS -> BOOT INTO LIVE MODE
+    if (!sdr.StartStream(88000000.0)) {
+        std::cerr << "[SDR] Failed to start stream." << std::endl;
+        return 1;
+    }
+
+    std::cout << "[SDR] Hardware found! Docker Microservice Active." << std::endl;
+    std::thread(dspWorker).detach(); // Start DSP only if hardware is live
+>>>>>>> 1e5ab748bb8441ba63521c633fa58c18256b0cbf
+    commandListener(&sdr);
+=======
     if (!g_redis_pub || g_redis_pub->err) {
         std::cerr << "[SDR-DAEMON] Redis connection failed!" << std::endl;
         return 1;
@@ -931,6 +969,7 @@ int main() {
     std::cout << "[SDR-DAEMON] Pipeline active. Waiting for relay connection..." << std::endl;
 
     commandListener();
+>>>>>>> d1503cad464ff592a7ee36479702b59cfe15fe71
 
     return 0;
 }

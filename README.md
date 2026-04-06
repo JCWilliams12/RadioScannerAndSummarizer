@@ -51,10 +51,19 @@ Paste the following into terminal:
 cd client
 npm install
 npm run dev
+<<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> d1503cad464ff592a7ee36479702b59cfe15fe71
 
 
 docker-compose up --build
 usbipd attach --wsl --busid <BUSID>
+<<<<<<< HEAD
+=======
+git 
+>>>>>>> 1e5ab748bb8441ba63521c633fa58c18256b0cbf
+=======
 docker-compose down
 docker-compose up --build
 
@@ -75,3 +84,4 @@ docker-compose up --build
 
 
 
+>>>>>>> d1503cad464ff592a7ee36479702b59cfe15fe71
