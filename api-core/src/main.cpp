@@ -191,11 +191,21 @@ int main() {
         return makeCorsResponse({{"status", action == "start" ? "live_started" : "live_stopped"}});
     });
 
-    // Record command via Redis, triggering sdr hardware to capture 30-second audio sample of selected frequency 
+// Record command via Redis, triggering sdr hardware to capture 30-second audio sample of selected frequency 
     CROW_ROUTE(app, "/api/scan/record").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto x = crow::json::load(req.body); if (!x) return crow::response(400);
-        crow::json::wvalue cmd; cmd["command"] = "RECORD"; cmd["freq"] = x["freq"].d();
+        
+        crow::json::wvalue cmd; 
+        cmd["command"] = "RECORD"; 
+        cmd["freq"] = x["freq"].d();
+        
+        // --- THE MISSING LINK ---
+        // Forward the exact timestamp to the SDR worker!
+        if (x.has("timestamp")) {
+            cmd["timestamp"] = x["timestamp"].i();
+        }
+
         std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
         redisCommand(g_redis_pub, "PUBLISH sdr_commands %s", cmd.dump().c_str());
         return makeCorsResponse({{"status", "recording_started"}});
@@ -508,24 +518,28 @@ CROW_ROUTE(app, "/api/search")
         }
     });
 
-    // Inserts new completed records (freq, time, raw text and AI sum) into DB 
+// Inserts new completed records (freq, time, raw text and AI sum) into DB 
     CROW_ROUTE(app, "/api/logs/save").methods(crow::HTTPMethod::Post)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
         if (!body) return makeCorsResponse({{"status", "error"}, {"message", "Invalid JSON"}}, 400);
 
         double freq = body["freq"].d();
-        long long time = body["time"].i();
+        long long time = body["time"].i(); 
         std::string location = body["location"].s();
         std::string rawT = body["rawT"].s();
         std::string summary = body["summary"].s();
         std::string channelName = body["channelName"].s();
         
-        // FIX ME!!!! DANIEL PLEASE I DONT WANT TO
-        std::string audioFilePath = "/api/audio/audio.wav";
+        // --- THE C++ TYPING FIX ---
+        // Explicitly cast both sides to std::string so the compiler is happy
+        // DANIEL FIX ME ! 
+        std::string audioFilePath = body.has("audioFilePath") 
+            ? std::string(body["audioFilePath"].s()) 
+            : std::string("/api/audio/captured_" + std::to_string(time) + ".wav");
 
-        insertLog(freq, time, location, rawT, summary, channelName, audioFilePath);
-        
+        insertLog(freq, time, location, rawT, summary, channelName, audioFilePath);  
+              
         return makeCorsResponse({{"status", "success"}});
     });
 
@@ -578,6 +592,11 @@ CROW_ROUTE(app, "/api/search")
         cmd["command"] = "TRANSCRIBE_LOCAL";
         cmd["freq"] = body["freq"].d();
 
+        // Adding file path 
+        if (body.has("file")) {
+            cmd["file"] = body["file"].s();
+        }
+
         std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
         redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
         return makeCorsResponse({{"status", "transcribing"}});
@@ -607,6 +626,11 @@ CROW_ROUTE(app, "/api/search")
         cmd["command"] = "TRANSCRIBE_OPENAI";
         cmd["freq"] = body["freq"].d();
 
+        // adding file path 
+        if (body.has("file")) {
+            cmd["file"] = body["file"].s();
+        }
+
         std::lock_guard<std::mutex> lock(g_redis_pub_mtx);
         redisCommand(g_redis_pub, "PUBLISH ai_commands %s", cmd.dump().c_str());
         return makeCorsResponse({{"status", "transcribing"}});
@@ -628,6 +652,34 @@ CROW_ROUTE(app, "/api/search")
     });
 
     CROW_ROUTE(app, "/stations")([]() { return makeCorsResponse(crow::json::wvalue::list()); });
+
+    // Serves the audio files to the frontend for playback
+    CROW_ROUTE(app, "/api/audio/<string>")
+    ([](const crow::request& req, std::string filename){
+        
+        std::string filepath = "/app/shared/audio/" + filename; 
+        
+        // Open file in binary mode
+        std::ifstream file(filepath, std::ios::binary);
+        if (!file.good()) {
+            std::cout << "\n[AUDIO ERROR] File missing at: " << filepath << std::endl;
+            return crow::response(404, "File not found");
+        }
+        
+        std::cout << "\n[AUDIO SUCCESS] Bypassing sandbox. Loading into memory: " << filepath << std::endl;
+        
+        // Read the exact binary data into a buffer
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        
+        // Return the binary data directly in the response body!
+        crow::response res(buffer.str());
+        res.add_header("Content-Type", "audio/wav");
+        res.add_header("Access-Control-Allow-Origin", "*");
+        res.add_header("Accept-Ranges", "bytes"); // Helps the browser audio player
+        return res;
+    });
+    // --- END OF NEW ROUTE ---
 
     std::cout << "[API] Gateway online at http://0.0.0.0:8080" << std::endl;
     app.port(8080).multithreaded().run();

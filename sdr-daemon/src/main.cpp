@@ -12,7 +12,7 @@
 #include <cstring>
 #include <sched.h>
 #include <pthread.h>
-
+#include <ctime>
 #include <sndfile.h>
 #include "crow.h"
 
@@ -590,12 +590,17 @@ void commandListener() {
                 relay_cmd["freq"]    = targetFreq;
                 sendCtrlCommand(relay_cmd.dump());
             }
-            // RECORD: allowed unless scanning (can coexist with LIVE_LISTEN) ----
+// RECORD: allowed unless scanning (can coexist with LIVE_LISTEN) ----
             else if (cmd == "RECORD" && !g_scanning.load(std::memory_order_relaxed)
                                      && !g_recording.load(std::memory_order_relaxed)) {
                 g_recording.store(true, std::memory_order_release);
+                
+                // --- THE FIX ---
+                // Extract 'ts' from the json BEFORE starting the thread!
+                long long ts = json.has("timestamp") ? json["timestamp"].i() : (long long)std::time(nullptr);
 
-                std::thread([targetFreq]() {
+                // Now we safely pass 'targetFreq' and 'ts' into the thread
+                std::thread([targetFreq, ts]() {
                     if (!g_live_listen.load(std::memory_order_relaxed)) {
                         crow::json::wvalue hw_cmd;
                         hw_cmd["command"] = "CONFIGURE";
@@ -617,7 +622,9 @@ void commandListener() {
                     // Ensure the output directory exists
                     mkdir("/app/shared/audio", 0755);
 
-                    std::string filename = "/app/shared/audio/audio.wav";
+                    // Use the 'ts' variable we passed into the thread
+                    std::string filename = "/app/shared/audio/captured_" + std::to_string(ts) + ".wav";
+                    
                     SF_INFO sfinfo;
                     std::memset(&sfinfo, 0, sizeof(sfinfo));
                     sfinfo.channels   = 1;
@@ -831,13 +838,14 @@ void mockCommandListener() {
                 double freq = json.has("freq") ? json["freq"].d() : 0.0;
                 std::cout << "[Mock SDR] Recording " << freq << " MHz (simulated 30s)..." << std::endl;
 
-                std::thread([freq]() {
+                long long ts = json.has("timestamp") ? json["timestamp"].i() : (long long)std::time(nullptr);
+                std::thread([freq, ts]() {
                     std::this_thread::sleep_for(std::chrono::seconds(30));
 
                     crow::json::wvalue msg;
                     msg["event"] = "record_complete";
                     msg["freq"]  = freq;
-                    msg["file"]  = "/app/shared/audio/audio.wav";
+                    msg["file"] = "/app/shared/audio/captured_" + std::to_string(ts) + ".wav";
 
                     redisContext* pub = redisConnect("ag-redis", 6379);
                     if (pub && !pub->err) {

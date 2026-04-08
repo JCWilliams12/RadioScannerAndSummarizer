@@ -456,15 +456,26 @@ function App() {
     let objectUrl = "";
 
     if (showPlaybackMenu && selectedLog) {
-      // Pull dynamic audio path if available, fallback to default
-      const fetchPath = selectedLog.audioFilePath || "/api/audio/audio.wav";
+      // HARDWIRED to explicitly ask the C++ backend for audio.wav
+      //const fetchPath = "http://localhost:8080/api/audio/audio.wav";
+       const fetchPath = `http://localhost:8080${selectedLog.audioFilePath}`;
+
+      
       fetch(fetchPath)
-        .then(res => res.blob())
+        .then(res => {
+          if (!res.ok) throw new Error("File not found on backend!");
+          return res.blob();
+        })
         .then(blob => {
-          objectUrl = URL.createObjectURL(blob);
+          // Force the blob to be read as a wav file
+          const wavBlob = new Blob([blob], { type: 'audio/wav' });
+          objectUrl = URL.createObjectURL(wavBlob);
           setLocalAudioUrl(objectUrl);
         })
-        .catch(err => console.error("Error fetching audio:", err));
+        .catch(err => {
+          console.error("Playback Error:", err.message);
+          alert("Could not load audio.wav from the backend.");
+        });
     }
 
     return () => {
@@ -483,17 +494,27 @@ function App() {
       const freq = data.freq;
 
       if (data.event === "record_complete") {
-        // Recording finished → kick off transcription
+        
+        const generatedFilename = data.file.split('/').pop();
+        const apiAudioPath = `/api/audio/${generatedFilename}`;
+
         setScanProgress(50);
         setScanStatus("AI: Transcribing audio...");
-        updateJob(freq, { summary: "AI: Processing transcription..." });
+        updateJob(freq, { 
+            summary: "AI: Processing transcription...",
+            audioFilePath: apiAudioPath 
+        });
         
+        //Add the file property to the JSON body
         fetch(useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ freq: parseFloat(freq) }),
+          body: JSON.stringify({ 
+              freq: parseFloat(freq),
+              file: generatedFilename // <--- Pass the filename to the API!
+          }),
         });
-      } 
+      }
       else if (data.event === "transcription_complete") {
         // Transcription finished → show text immediately, kick off summary
         setScanProgress(75);
@@ -536,24 +557,33 @@ function App() {
     if (!selectedStation) return;
     const targetFreq = selectedStation.freq;
 
+    // 1. Generate the master timestamp exactly ONCE
+    const scanTimestamp = Math.floor(Date.now() / 1000);
+
     setIsScanning(true);
     setScanProgress(5);
     setScanStatus(`Connecting to ${Number(targetFreq).toFixed(3)} MHz...`);
 
+    // 2. Save it to the job state so we can use it later when saving
     updateJob(targetFreq, { 
       status: "recording",
       summary: "Hardware: Recording 30-second capture...",
-      rawText: `Capturing audio from ${Number(targetFreq).toFixed(3)} MHz...`
+      rawText: `Capturing audio from ${Number(targetFreq).toFixed(3)} MHz...`,
+      timestamp: scanTimestamp // <--- MUST BE HERE
     });
 
     try {
       setScanProgress(10);
       setScanStatus("Hardware: Starting 30-second recording...");
       
+      // 3. SEND THE TIMESTAMP TO THE HARDWARE!
       const recordRes = await fetch('/api/scan/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ freq: parseFloat(targetFreq) })
+        body: JSON.stringify({ 
+          freq: parseFloat(targetFreq),
+          timestamp: scanTimestamp // <--- MISSING LINK ADDED HERE
+        })
       });
 
       let recordData = null;
@@ -613,6 +643,9 @@ function App() {
     const targetFreq = selectedStation.freq;
     const jobData = scanJobs[targetFreq];
 
+    console.log("audioFilePath being saved:", jobData.audioFilePath);
+    console.log("Full jobData:", jobData);
+
     if (!jobData || jobData.status !== "complete") {
       alert("Please wait for the scan to finish before saving!");
       return;
@@ -628,8 +661,8 @@ function App() {
           location: "Birmingham, AL", 
           rawT: jobData.rawText,       
           summary: jobData.summary,    
-          channelName: selectedStation.name
-        }),
+          channelName: selectedStation.name,
+          audioFilePath: jobData.audioFilePath || `/api/audio/captured_${jobData.timestamp}.wav`        }),
       });
 
       if (response.ok) {

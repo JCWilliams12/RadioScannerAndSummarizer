@@ -12,7 +12,6 @@ std::string getEnvVar(std::string key) {
     return val == NULL ? std::string("") : std::string(val);
 }
 
-
 int main() {
     std::cout << "[AI Worker] Online and waiting..." << std::endl;
     redisContext *c = redisConnect("ag-redis", 6379);
@@ -21,7 +20,7 @@ int main() {
     redisReply *reply = (redisReply*)redisCommand(c, "SUBSCRIBE ai_commands");
     freeReplyObject(reply);
 
-while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
+    while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
         if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
             auto json = crow::json::load(reply->element[2]->str);
             if (!json) {
@@ -32,12 +31,21 @@ while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
             std::string cmd = json["command"].s();
             double targetFreq = json["freq"].d();
 
+            // --- THE FINAL FIX ---
+            // Extract the dynamic filename from the JSON, default to audio.wav if missing
+            std::string filename = json.has("file") ? std::string(json["file"].s()) : "audio.wav";
+            std::string audioFilePath = "/app/shared/audio/" + filename;
+
             std::cout << "\n[AI Worker] Received command: " << cmd << " for " << targetFreq << " MHz" << std::endl;
+            std::cout << "[AI Worker] Target audio file: " << audioFilePath << std::endl;
 
             if (cmd == "TRANSCRIBE_LOCAL") {
                 std::cout << "[AI Worker] Starting Local Whisper..." << std::endl;
                 WhisperTest transcriber("/app/shared/models/ggml-base.en.bin");
-                std::string text = transcriber.transcribe("/app/shared/audio/audio.wav");
+                
+                // Pass the dynamic path to the transcriber!
+                std::string text = transcriber.transcribe(audioFilePath); 
+                
                 std::cout << "[AI Worker] Local Whisper Output: " << text << std::endl;
                 
                 crow::json::wvalue msg; 
@@ -55,7 +63,10 @@ while (redisGetReply(c, (void**)&reply) == REDIS_OK) {
             }
             else if (cmd == "TRANSCRIBE_OPENAI") {
                 std::cout << "[AI Worker] Sending audio to OpenAI API..." << std::endl;
-                std::string text = transcribeAudio("/app/shared/audio/audio.wav", getEnvVar("OPENAI_API_KEY"));
+                
+                // Pass the dynamic path to the OpenAI API!
+                std::string text = transcribeAudio(audioFilePath, getEnvVar("OPENAI_API_KEY"));
+                
                 std::cout << "[AI Worker] OpenAI API Response: " << text << std::endl;
                 
                 crow::json::wvalue msg; 
