@@ -135,7 +135,7 @@ const HeaderLogo = ({ isHovered, onHoverStart, onHoverEnd }) => {
             key={i}
             custom={i}
             initial="initial"
-            animate={isHovered ? "active" : "initial"}
+            animate={"active"}
             variants={arcVariants}
             /* Quarter-circle arc: starts at (r, 0) and sweeps to (0, r) */
             d={`M ${arc.r} 0 A ${arc.r} ${arc.r} 0 0 1 0 ${arc.r}`}
@@ -182,19 +182,40 @@ function App() {
   const [selectedLog, setSelectedLog] = useState(null);
   const [logs, setLogs] = useState([]);
 
+  // State for search term
+  const [searchTerm, setSearchTerm] = useState("");
+
+  // State that tracks whether a search is active.
+  const [isSearchActive, setIsSearchActive] = useState(false);
+
   // --- Advanced Filtering State ---
   const [showFilters, setShowFilters] = useState(false);
-  const [isSearchActive, setIsSearchActive] = useState(false);
   const [filterFreq, setFilterFreq] = useState("");
   const [filterLoc, setFilterLoc] = useState("");
   const [filterKeyword, setFilterKeyword] = useState("");
   const [filterStart, setFilterStart] = useState("");
   const [filterEnd, setFilterEnd] = useState("");
 
+  // --- AI Agent State ---
+  const [isAgentOpen, setIsAgentOpen] = useState(false);
+  const [agentMessages, setAgentMessages] = useState([]);
+  const [agentInput, setAgentInput] = useState("");
+  const [isAgentThinking, setIsAgentThinking] = useState(false);
+
   // --- Scan loading state ---
   const [isScanning, setIsScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
   const [scanProgress, setScanProgress] = useState(0);
+
+  // --- Queue / Favorites state ---
+  // scanQueue: array of station objects { id, name, freq } waiting to be scanned, FIFO
+  const [scanQueue, setScanQueue] = useState([]);
+  // favorites: Set of station ids (by string id) that auto-refill the queue
+  const [favorites, setFavorites] = useState(new Set());
+  // activeScanFreq: frequency currently being processed by the pipeline (null = idle)
+  const [activeScanFreq, setActiveScanFreq] = useState(null);
+  // favoritesCursor: rotates through favorites list when auto-refilling the queue
+  const favoritesCursorRef = useRef(0);
 
 
   // For Playback function on DB page
@@ -215,51 +236,12 @@ function App() {
   const audioCtxRef = useRef(null);
   const wsRef = useRef(null);
 
+  // --- FIX: Scheduler ref to queue audio chunks back-to-back ---
   // Without this, all chunks fire at "now" causing rhythmic gaps/stuttering
   const nextPlayTimeRef = useRef(0);
 
   // Scanner State
   const [isScanningBand, setIsScanningBand] = useState(false);
-
-  const [isAgentOpen, setIsAgentOpen] = useState(false);
-  const [agentMessages, setAgentMessages] = useState([]);
-  const [agentInput, setAgentInput] = useState("");
-  const [isAgentThinking, setIsAgentThinking] = useState(false);
-
-  const handleAgentSubmit = async (e) => {
-    e.preventDefault();
-    if (!agentInput.trim() || isAgentThinking) return;
-
-    const userText = agentInput.trim();
-    setAgentInput("");
-    setIsAgentThinking(true);
-
-    // Keep only the last 2 interactions (4 messages) to save tokens
-    const recentHistory = agentMessages.slice(-4);
-    const newMessages = [...recentHistory, { role: "user", content: userText }];
-    
-    // Optimistically update UI
-    setAgentMessages([...agentMessages, { role: "user", content: userText }]);
-
-    try {
-      const res = await fetch('/api/agent/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: newMessages })
-      });
-      const data = await res.json();
-      
-      if (data.answer) {
-        setAgentMessages(prev => [...prev, { role: "assistant", content: data.answer }]);
-      } else {
-        setAgentMessages(prev => [...prev, { role: "assistant", content: "Error: Agent failed to respond." }]);
-      }
-    } catch (err) {
-      setAgentMessages(prev => [...prev, { role: "assistant", content: "Connection error." }]);
-    } finally {
-      setIsAgentThinking(false);
-    }
-  };
 
   const formatTime = (timeInSeconds) => {
     if (isNaN(timeInSeconds)) return "00:00";
@@ -270,12 +252,19 @@ function App() {
 
   const [useOpenAI, setUseOpenAI] = useState(false);
 
+  // Refs for WebSocket listener to read current values without stale closures
+  const stationsRef = useRef([]);
+  const favoritesRef = useRef(new Set());
+  useEffect(() => { stationsRef.current = stations; }, [stations]);
+  useEffect(() => { favoritesRef.current = favorites; }, [favorites]);
+
   const fetchLogs = async () => {
     try {
       const res = await fetch('/api/logs'); 
       const data = await res.json();
       setLogs(data);
       setIsSearchActive(false);
+      setSearchTerm('');
       clearFilterInputs();
     } catch (err) {
       console.error("Failed to fetch logs:", err);
@@ -320,6 +309,41 @@ function App() {
       setIsSearchActive(true);
     } catch (error) {
       console.error("Failed to fetch advanced search results:", error);
+    }
+  };
+
+  const handleAgentSubmit = async (e) => {
+    e.preventDefault();
+    if (!agentInput.trim() || isAgentThinking) return;
+
+    const userText = agentInput.trim();
+    setAgentInput("");
+    setIsAgentThinking(true);
+
+    // Keep only the last 2 interactions (4 messages) to save tokens
+    const recentHistory = agentMessages.slice(-4);
+    const newMessages = [...recentHistory, { role: "user", content: userText }];
+    
+    // Optimistically update UI
+    setAgentMessages([...agentMessages, { role: "user", content: userText }]);
+
+    try {
+      const res = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: newMessages })
+      });
+      const data = await res.json();
+      
+      if (data.answer) {
+        setAgentMessages(prev => [...prev, { role: "assistant", content: data.answer }]);
+      } else {
+        setAgentMessages(prev => [...prev, { role: "assistant", content: "Error: Agent failed to respond." }]);
+      }
+    } catch (err) {
+      setAgentMessages(prev => [...prev, { role: "assistant", content: "Connection error." }]);
+    } finally {
+      setIsAgentThinking(false);
     }
   };
 
@@ -375,9 +399,10 @@ function App() {
     }
   };
 
-// LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
+  // LIVE AUDIO WEBSOCKET & HARDWARE TUNING HOOK
   useEffect(() => {
     if (isListeningLive && selectedStation) {
+      // FIX: Force the AudioContext to match the backend 16kHz output
       audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({
         sampleRate: 16000
       });
@@ -413,6 +438,7 @@ function App() {
         nextPlayTimeRef.current += audioBuffer.duration;
       };
 
+      // FIX: Trigger the LIVE_LISTEN command on the backend explicitly
       fetch('/api/scan/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -430,6 +456,7 @@ function App() {
         audioCtxRef.current = null;
       }
       
+      // FIX: Ensure backend terminates the live listen stream when off
       fetch('/api/scan/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -472,9 +499,10 @@ function App() {
     };
   }, [showPlaybackMenu, selectedLog]);
 
-  // THE 3-STEP SCAN HANDLER (Record -> Transcribe -> Summarize)
-// THE ASYNC PIPELINE: WebSocket listener drives transcription + summarization.
-  // handleScan only kicks off the recording. This listener handles the rest.
+  // THE ASYNC PIPELINE: WebSocket listener drives transcription + summarization.
+  // Progress is stored per-frequency in scanJobs so switching stations works.
+  // On summary_complete: auto-save if favorited, then clear activeScanFreq
+  // so the queue processor can pick the next scan.
   useEffect(() => {
     const statusWs = new WebSocket(`ws://${window.location.host}/ws/status`);
     
@@ -483,10 +511,11 @@ function App() {
       const freq = data.freq;
 
       if (data.event === "record_complete") {
-        // Recording finished → kick off transcription
-        setScanProgress(50);
-        setScanStatus("AI: Transcribing audio...");
-        updateJob(freq, { summary: "AI: Processing transcription..." });
+        updateJob(freq, {
+          progress: 50,
+          statusText: "AI: Transcribing audio...",
+          summary: "AI: Processing transcription..."
+        });
         
         fetch(useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local', {
           method: 'POST',
@@ -495,10 +524,9 @@ function App() {
         });
       } 
       else if (data.event === "transcription_complete") {
-        // Transcription finished → show text immediately, kick off summary
-        setScanProgress(75);
-        setScanStatus("AI: Generating summary...");
         updateJob(freq, { 
+          progress: 75,
+          statusText: "AI: Generating summary...",
           rawText: data.text,
           summary: `Generating AI Summary via ${useOpenAI ? 'ChatGPT' : 'Local'}...`
         });
@@ -510,18 +538,49 @@ function App() {
         });
       }
       else if (data.event === "summary_complete") {
-        // Summary finished → show it, then dismiss the loading bar
-        setScanProgress(100);
-        setScanStatus("Scan complete!");
         updateJob(freq, { 
+          progress: 100,
+          statusText: "Scan complete!",
           status: "complete",
           summary: data.summary 
         });
 
-        // Brief pause so user sees "100% / Scan complete!", then dismiss
+        // Auto-save if this station is favorited (check by finding the station)
+        // We look up the station via the stations list so we have name/id.
+        setScanJobs(prevJobs => {
+          const job = prevJobs[freq];
+          if (job) {
+            // Find matching station (might be in main list or from a scanned queue entry)
+            const station = stationsRef.current.find(s => parseFloat(s.freq) === parseFloat(freq));
+            if (station && favoritesRef.current.has(station.id)) {
+              // Fire auto-save (fire-and-forget)
+              fetch('/api/logs/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  freq: parseFloat(freq),
+                  time: Math.floor(Date.now() / 1000),
+                  location: "Birmingham, AL",
+                  rawT: job.rawText,
+                  summary: data.summary,
+                  channelName: station.name
+                }),
+              }).then(res => {
+                if (res.ok) {
+                  console.log(`[Auto-save] Saved favorited station ${station.name}`);
+                  fetchLogs();
+                }
+              }).catch(err => console.error("Auto-save failed:", err));
+            }
+          }
+          return prevJobs;
+        });
+
+        // Brief pause so "100% / Scan complete!" is visible, then clear the
+        // bar on this freq and release the pipeline for the next queue item.
         setTimeout(() => {
-          setIsScanning(false);
-          setScanProgress(0);
+          updateJob(freq, { progress: 0, statusText: "" });
+          setActiveScanFreq(null);
         }, 1200);
       }
     };
@@ -530,25 +589,67 @@ function App() {
   }, [useOpenAI]);
 
 
-  // SCAN HANDLER: kicks off recording only. The WebSocket listener above
-  // drives transcription → summarization → completion automatically.
-  const handleScan = async () => {
+  // ENQUEUE: adds a station to the queue. The processor effect below
+  // will pick it up when the pipeline is idle.
+  const handleScan = () => {
     if (!selectedStation) return;
-    const targetFreq = selectedStation.freq;
+    enqueueStation(selectedStation);
+  };
 
-    setIsScanning(true);
-    setScanProgress(5);
-    setScanStatus(`Connecting to ${Number(targetFreq).toFixed(3)} MHz...`);
+  const enqueueStation = (station) => {
+    setScanQueue(prev => {
+      // Prevent duplicate queue entries for the same freq
+      if (prev.some(q => parseFloat(q.freq) === parseFloat(station.freq))) return prev;
+      return [...prev, station];
+    });
+  };
+
+  const removeFromQueue = (freq) => {
+    setScanQueue(prev => prev.filter(q => parseFloat(q.freq) !== parseFloat(freq)));
+  };
+
+  // QUEUE PROCESSOR: when the pipeline is idle and there's something to scan,
+  // dequeue the next station and start its recording. When the queue is empty
+  // but there are favorites, cycle to the next favorite and enqueue it.
+  useEffect(() => {
+    if (activeScanFreq !== null) return; // pipeline busy
+
+    // Queue has entries → start the next one
+    if (scanQueue.length > 0) {
+      const next = scanQueue[0];
+      setScanQueue(prev => prev.slice(1));
+      runScan(next);
+      return;
+    }
+
+    // Queue empty but favorites exist → cycle and enqueue
+    if (favorites.size > 0) {
+      const favStations = stations.filter(s => favorites.has(s.id));
+      if (favStations.length > 0) {
+        const idx = favoritesCursorRef.current % favStations.length;
+        favoritesCursorRef.current = (idx + 1) % favStations.length;
+        const nextFav = favStations[idx];
+        setScanQueue([nextFav]);
+      }
+    }
+  }, [activeScanFreq, scanQueue, favorites, stations]);
+
+  // RUN SCAN: kicks off the recording for a single station. The WebSocket
+  // listener handles transcription → summarization → auto-save → release.
+  const runScan = async (station) => {
+    const targetFreq = station.freq;
+    setActiveScanFreq(parseFloat(targetFreq));
 
     updateJob(targetFreq, { 
       status: "recording",
+      progress: 5,
+      statusText: `Connecting to ${Number(targetFreq).toFixed(3)} MHz...`,
       summary: "Hardware: Recording 30-second capture...",
       rawText: `Capturing audio from ${Number(targetFreq).toFixed(3)} MHz...`
     });
 
     try {
-      setScanProgress(10);
-      setScanStatus("Hardware: Starting 30-second recording...");
+      updateJob(targetFreq, { progress: 10, statusText: "Hardware: Starting 30-second recording..." });
       
       const recordRes = await fetch('/api/scan/record', {
         method: 'POST',
@@ -567,17 +668,21 @@ function App() {
         throw new Error(`Recording failed. Status: ${recordRes.status}`);
       }
 
-      // Animate progress bar during the 30-second recording
+      updateJob(targetFreq, { summary: "Hardware: Background recording in progress (30s)..." });
+
+      // Animate progress over the 30-second window
       const recordingStart = Date.now();
       const recordingDuration = 31000;
       const progressInterval = setInterval(() => {
         const elapsed = Date.now() - recordingStart;
         const ratio = Math.min(elapsed / recordingDuration, 1);
         const currentProgress = Math.round(10 + ratio * 35); // 10% → 45%
-        setScanProgress(currentProgress);
-
         const secondsLeft = Math.max(0, Math.ceil((recordingDuration - elapsed) / 1000));
-        setScanStatus(`Hardware: Recording in progress... (${secondsLeft}s remaining)`);
+
+        updateJob(targetFreq, {
+          progress: currentProgress,
+          statusText: `Hardware: Recording in progress... (${secondsLeft}s remaining)`
+        });
 
         if (ratio >= 1) clearInterval(progressInterval);
       }, 500);
@@ -585,22 +690,20 @@ function App() {
       await new Promise(resolve => setTimeout(resolve, recordingDuration));
       clearInterval(progressInterval);
 
-      // Recording timer done — WebSocket listener takes over from here.
-      // Keep the loading bar visible while waiting for record_complete event.
-      setScanProgress(48);
-      setScanStatus("Waiting for AI pipeline...");
+      updateJob(targetFreq, { progress: 48, statusText: "Waiting for AI pipeline..." });
+      // WebSocket listener takes over from here — it will eventually clear activeScanFreq.
 
     } catch (error) {
       console.error(`Scan error on ${targetFreq}:`, error);
       updateJob(targetFreq, { 
         status: "error",
+        progress: 0,
+        statusText: `Error: ${error.message}`,
         summary: `Error: ${error.message}`,
         rawText: "Scan failed. Check server console."
       });
-      setScanStatus(`Error: ${error.message}`);
-      setScanProgress(0);
-      await new Promise(r => setTimeout(r, 2000));
-      setIsScanning(false);
+      // Release the pipeline so the next queue item can run
+      setTimeout(() => setActiveScanFreq(null), 2000);
     }
   };
 
@@ -676,10 +779,24 @@ function App() {
     setView('home');
   };
 
+  const toggleFavorite = (stationId) => {
+    setFavorites(prev => {
+      const next = new Set(prev);
+      if (next.has(stationId)) next.delete(stationId);
+      else next.add(stationId);
+      return next;
+    });
+  };
+
   // UI DERIVATIONS (Extracting the current job status for the UI dynamically)
   const currentJob = selectedStation ? scanJobs[selectedStation.freq] : null;
   const displaySummary = currentJob ? currentJob.summary : (isScanningBand ? "Hardware: Performing 88-108 MHz sweep..." : "Waiting for scan...");
   const displayRawText = currentJob ? currentJob.rawText : "";
+  // Progress bar shows only when the *currently viewed* station has an active scan
+  const showProgressBar = currentJob && currentJob.progress > 0 && currentJob.status !== "complete"
+    || (currentJob && currentJob.progress === 100);
+  const currentProgress = currentJob?.progress || 0;
+  const currentStatusText = currentJob?.statusText || "";
 
   return (
     <div className="container">
@@ -990,19 +1107,19 @@ function App() {
  {/* SCANNING VIEW */}
       {view === 'scanning' && (
         <div className="scanning-container">
-          <div className="scanning-grid">
+          <div className="scanning-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 0.55fr', gap: '20px', alignItems: 'start' }}>
             <div className="data-box">
               <h3 style={{ marginBottom: '15px' }}>Live Frequencies</h3>
               
               <button 
                 className="sub-btn" 
                 onClick={handleWidebandSweep}
-                disabled={isScanningBand || isScanning}
+                disabled={isScanningBand || activeScanFreq !== null}
                 style={{ 
                   width: '100%',      
                   marginBottom: '15px', 
                   padding: '12px',
-                  backgroundColor: isScanningBand ? '#f39c12' : '#3b82f6',
+                  backgroundColor: (isScanningBand || activeScanFreq !== null) ? '#f39c12' : '#3b82f6',
                   color: 'white',
                   fontWeight: 'bold',
                   display: 'flex',
@@ -1010,28 +1127,48 @@ function App() {
                   alignItems: 'center',
                   border: 'none',
                   borderRadius: '6px',
-                  cursor: isScanningBand ? 'wait' : 'pointer',
+                  cursor: (isScanningBand || activeScanFreq !== null) ? 'not-allowed' : 'pointer',
                   transition: 'background-color 0.3s ease'
                 }}
               >
-                {isScanningBand ? "Sweeping Spectrum (88-108 MHz)..." : "Auto-Find Stations"}
+                {isScanningBand ? "Sweeping Spectrum (88-108 MHz)..." : 
+                 activeScanFreq !== null ? "Scan in progress..." : "Auto-Find Stations"}
               </button>
 
               {/* Zeroed out default browser list spacing and made it scrollable */}
-              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none', opacity: isScanning ? 0.5 : 1, pointerEvents: isScanning ? 'none' : 'auto' }}>
+              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none' }}>
                 {stations.map(s => (
                   <li 
                     key={s.id}
                     onClick={() => {
-                      if (isScanning) return;
                       setSelectedStation(s);
                       setIsListeningLive(false);
                     }}
                     className={selectedStation?.id === s.id ? "active-station" : ""}
                   >
-                    <div className="station-item-content">
-                      <span className="freq-tag">{Number(s.freq).toFixed(3)} MHz</span>
-                      <span className="station-name">{s.name}</span>
+                    <div className="station-item-content" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', flex: 1, minWidth: 0 }}>
+                        <span className="freq-tag">{Number(s.freq).toFixed(3)} MHz</span>
+                        <span className="station-name">{s.name}</span>
+                      </div>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleFavorite(s.id);
+                        }}
+                        title={favorites.has(s.id) ? "Unfavorite (stop auto-cycling)" : "Favorite (auto-cycle when queue is empty)"}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          fontSize: '1.3em',
+                          color: favorites.has(s.id) ? '#f1c40f' : '#555',
+                          padding: '0 8px',
+                          transition: 'color 0.2s',
+                        }}
+                      >
+                        {favorites.has(s.id) ? '★' : '☆'}
+                      </button>
                     </div>
                   </li>
                 ))}
@@ -1041,8 +1178,8 @@ function App() {
             <div className="data-box">
               <h3>Transmission Summary</h3>
               <div className="summary-content">
-                {/* Progress bar shows on top during scanning, results always visible below */}
-                {isScanning && <ScanProgress status={scanStatus} progress={scanProgress} />}
+                {/* Progress bar shows when the currently viewed station has an active scan */}
+                {showProgressBar && <ScanProgress status={currentStatusText} progress={currentProgress} />}
                 
                 <p className="summary-text">
                   {selectedStation ? `Target: ${Number(selectedStation.freq).toFixed(3)} MHz` : "Select a frequency"}
@@ -1061,7 +1198,7 @@ function App() {
                 )}
               </div>
                 <div className="action-buttons">
-                {/* RESTORED: Listen Live Toggle */}
+                {/* Listen Live — allowed any time except when a *different* station is mid-scan */}
                 <button 
                   className="sub-btn" 
                   style={{ 
@@ -1069,7 +1206,10 @@ function App() {
                     color: 'white' 
                   }}
                   onClick={() => setIsListeningLive(!isListeningLive)} 
-                  disabled={!selectedStation}
+                  disabled={
+                    !selectedStation ||
+                    (activeScanFreq !== null && parseFloat(selectedStation.freq) !== activeScanFreq)
+                  }
                 >
                   {isListeningLive ? "Stop Live Audio" : "Listen Live"}
                 </button>
@@ -1077,18 +1217,112 @@ function App() {
                 <button 
                   className="sub-btn scan-btn" 
                   onClick={handleScan} 
-                  disabled={!selectedStation || isScanning}
+                  disabled={!selectedStation}
                 >
-                  {isScanning ? "Scanning..." : "Scan"}
+                  {currentJob && currentJob.status === "recording" ? "Scanning..." : "Scan"}
                 </button>
                 
                 <button 
                   className="sub-btn save-btn" 
                   onClick={handleSave} 
-                  disabled={!selectedStation || isScanning || currentJob?.status !== 'complete'}
+                  disabled={!selectedStation || currentJob?.status !== 'complete'}
                 >
                   Save
                 </button>
+              </div>
+            </div>
+
+            {/* QUEUE COLUMN: Progress bar top (25%), gap (5%), queue list bottom (70%) */}
+            <div className="data-box" style={{ display: 'flex', flexDirection: 'column', height: '480px' }}>
+              {/* TOP 25%: Active pipeline status */}
+              <div style={{ 
+                flex: '0 0 25%',
+                minHeight: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'flex-start',
+                borderBottom: '1px solid #222',
+                paddingBottom: '8px',
+              }}>
+                <h3 style={{ marginTop: 0, marginBottom: '10px', fontSize: '1em' }}>Pipeline</h3>
+                {activeScanFreq !== null ? (
+                  <>
+                    <p style={{ margin: '0 0 6px 0', fontSize: '0.85em', color: '#8cb4d5' }}>
+                      Scanning {Number(activeScanFreq).toFixed(3)} MHz
+                    </p>
+                    <p style={{ margin: 0, fontSize: '0.75em', color: '#5a8aad' }}>
+                      {scanJobs[activeScanFreq]?.statusText || "Working..."}
+                    </p>
+                  </>
+                ) : (
+                  <p style={{ margin: 0, fontSize: '0.85em', color: '#666' }}>
+                    Pipeline idle
+                  </p>
+                )}
+              </div>
+
+              {/* 5% GAP */}
+              <div style={{ flex: '0 0 5%' }} />
+
+              {/* BOTTOM 70%: Queue */}
+              <div style={{ 
+                flex: '0 0 70%',
+                minHeight: 0,
+                display: 'flex',
+                flexDirection: 'column',
+              }}>
+                <h3 style={{ marginTop: 0, marginBottom: '10px', fontSize: '1em' }}>
+                  Queue ({scanQueue.length})
+                </h3>
+                <ul style={{ 
+                  flex: 1,
+                  overflowY: 'auto',
+                  margin: 0,
+                  padding: 0,
+                  listStyle: 'none',
+                }}>
+                  {scanQueue.length === 0 ? (
+                    <li style={{ color: '#555', fontSize: '0.85em', fontStyle: 'italic', padding: '8px 4px' }}>
+                      {favorites.size > 0 
+                        ? "Cycling favorites..." 
+                        : "Empty — click Scan or favorite (★) stations to add."}
+                    </li>
+                  ) : (
+                    scanQueue.map((q, idx) => (
+                      <li key={`${q.id}-${idx}`} style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '6px 8px',
+                        marginBottom: '4px',
+                        backgroundColor: 'rgba(0,43,94,0.2)',
+                        borderRadius: '4px',
+                        fontSize: '0.85em',
+                      }}>
+                        <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          <span style={{ color: '#8cb4d5', fontWeight: 'bold' }}>
+                            {Number(q.freq).toFixed(3)}
+                          </span>
+                          <span style={{ color: '#aaa', marginLeft: '6px' }}>{q.name}</span>
+                        </div>
+                        <button
+                          onClick={() => removeFromQueue(q.freq)}
+                          title="Remove from queue"
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: '#e74c3c',
+                            cursor: 'pointer',
+                            fontSize: '1em',
+                            padding: '0 6px',
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </li>
+                    ))
+                  )}
+                </ul>
               </div>
             </div>
           </div>
@@ -1098,7 +1332,7 @@ function App() {
         </div>
       )}
     </div>
-  )
+  );
 }
  
 export default App
