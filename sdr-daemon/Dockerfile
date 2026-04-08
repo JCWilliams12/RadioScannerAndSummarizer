@@ -21,5 +21,10 @@ RUN mkdir -p build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make -j$(nproc)
 
+<<<<<<< HEAD
+# 6. Start the Service and the Daemon (Using absolute path to service)
+CMD sh -c "sudo /opt/sdrplay_api/sdrplay_apiService & sleep 2 && ./build/sdr_daemon"
+=======
 # 5. Launch — no sdrplay_apiService needed anymore
 CMD ["./build/sdr_daemon"]
+>>>>>>> d1503cad464ff592a7ee36479702b59cfe15fe71
