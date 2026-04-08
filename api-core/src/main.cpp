@@ -349,6 +349,8 @@ CROW_ROUTE(app, "/api/search")
         // --- 1. Construct Initial Payload ---
         crow::json::wvalue payload;
         payload["model"] = "gpt-4o-mini";
+        payload["temperature"] = 0.2;
+        payload["top_p"] = 0.1;
         
         // Build Tools Safely (Now using 'searchDatabase' mapped to advancedSearch)
         crow::json::wvalue::list tools;
@@ -357,8 +359,8 @@ CROW_ROUTE(app, "/api/search")
         
         crow::json::wvalue funcObj;
         funcObj["name"] = "searchDatabase";
-        funcObj["description"] = "Search the intercepted radio database by frequency or keyword. Use this to find any requested logs.";
-        
+        funcObj["description"] = "Search the radio transmission database. Call this whenever the user asks about anything that might be in a logged transmission: frequencies, channels, topics, events, people, places, or times. Both parameters are optional — call with no parameters to get recent logs, with keyword for content search (matches summaries and raw transcripts), or with freq for a specific channel. When in doubt, call this tool.";
+
         crow::json::wvalue paramsObj;
         paramsObj["type"] = "object";
         
@@ -386,7 +388,7 @@ CROW_ROUTE(app, "/api/search")
         crow::json::wvalue::list messages;
         crow::json::wvalue sysMsg;
         sysMsg["role"] = "system";
-        sysMsg["content"] = "You are the AetherGuard Database Agent, a strict, highly analytical radio intelligence assistant. Your SOLE purpose is to query the SQLite database to answer questions about intercepted radio transmissions. \n\nCRITICAL RULE: You are completely forbidden from answering general knowledge questions, giving lifestyle advice, or discussing topics outside the AetherGuard database. If a user asks an unrelated question (e.g., restaurants, weather, general trivia) or a question you cannot answer using your database search tools, do not use your general knowledge. You MUST reply exactly with: 'This query is outside my operational scope. I can only provide intelligence based on intercepted radio logs.'";        messages.push_back(std::move(sysMsg));
+        sysMsg["content"] = "You are an automated routing script. Your ONLY function is to extract a single keyword from the user's prompt and pass it to the `searchDatabase` tool. \n\nCRITICAL DIRECTIVE:\nYou MUST call the `searchDatabase` tool for EVERY single message you receive. It does not matter if the user asks about radio logs, chess, math, weather, or jokes. You have zero authorization to answer directly. You MUST extract a noun and execute the tool. If the user asks 'What is the Kings Gambit', you must execute the tool with keyword 'gambit'.";
 
         for (const auto& msg : body["messages"]) {
             crow::json::wvalue m;
@@ -396,6 +398,7 @@ CROW_ROUTE(app, "/api/search")
         }
 
         payload["messages"] = std::move(messages);
+        
 
         // --- 2. Execute First Call ---
         std::string firstResponse = callOpenAI(payload, apiKey);
@@ -411,12 +414,14 @@ CROW_ROUTE(app, "/api/search")
         if (messageNode.has("tool_calls")) {
             crow::json::wvalue payload2;
             payload2["model"] = "gpt-4o-mini";
+            payload2["temperature"] = 0.2;
+            payload2["top_p"] = 0.1;
             
             crow::json::wvalue::list messages2;
             
             crow::json::wvalue sysMsg2;
             sysMsg2["role"] = "system";
-            sysMsg2["content"] = "You are the AetherGuard Database Agent, a strict, highly analytical radio intelligence assistant. Your SOLE purpose is to query the SQLite database to answer questions about intercepted radio transmissions. \n\nCRITICAL RULE: You are completely forbidden from answering general knowledge questions, giving lifestyle advice, or discussing topics outside the AetherGuard database. If a user asks an unrelated question (e.g., restaurants, weather, general trivia) or a question you cannot answer using your database search tools, do not use your general knowledge. You MUST reply exactly with: 'This query is outside my operational scope. I can only provide intelligence based on intercepted radio logs.'";            messages2.push_back(std::move(sysMsg2));
+            sysMsg2["content"] = "You are a strict database reporter. You are looking at the results of a database query.\n\nCRITICAL DIRECTIVE:\n1. If the tool returned logs: Summarize them accurately.\n2. If the tool returned 'No results found.': You MUST reply EXACTLY with 'This query is outside my operational scope. I can only provide intelligence based on intercepted radio logs.'\n3. You are FORBIDDEN from adding conversational filler, apologies, or pre-trained knowledge. If the database is empty, the exact string above is your ONLY allowed output.";
 
             for (const auto& msg : body["messages"]) {
                 crow::json::wvalue m;
@@ -459,10 +464,12 @@ CROW_ROUTE(app, "/api/search")
                     std::vector<RadioLog> logs = advancedSearch(freq, "", keyword, "", "");
                     
                     if (!logs.empty()) {
-                        dbResultText = "Found " + std::to_string(logs.size()) + " logs:\n";
+                        dbResultText = "Found " + std::to_string(logs.size()) + " total logs";
+                        if (logs.size() > 10) dbResultText += " (showing first 10)";
+                        dbResultText += ":\n";
                         int count = 0;
                         for (const auto& log : logs) {
-                            if (count++ >= 10) break; // Token limit protection
+                            if (count++ >= 10) break;
                             dbResultText += "- [" + std::to_string(log.time) + "] " + log.channelName + " (" + std::to_string(log.freq) + " MHz): " + log.summary + "\n";
                         }
                     }
