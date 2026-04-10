@@ -580,10 +580,11 @@ function App() {
                 body: JSON.stringify({
                   freq: parseFloat(freq),
                   time: Math.floor(Date.now() / 1000),
-                  location: "Birmingham, AL",
+                  location: "Huntsville, AL",
                   rawT: job.rawText,
                   summary: data.summary,
-                  channelName: station.name
+                  channelName: station.name,
+                  audioFilePath: job.audioFilePath || `/api/audio/captured_${job.timestamp}.wav`
                 }),
               }).then(res => {
                 if (res.ok) {
@@ -760,7 +761,7 @@ function App() {
         body: JSON.stringify({
           freq: parseFloat(targetFreq),
           time: Math.floor(Date.now() / 1000), 
-          location: "Birmingham, AL", 
+          location: "Huntsville, AL", 
           rawT: jobData.rawText,       
           summary: jobData.summary,    
           channelName: selectedStation.name,
