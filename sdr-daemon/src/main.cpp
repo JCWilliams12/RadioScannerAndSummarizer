@@ -594,13 +594,9 @@ void commandListener() {
             else if (cmd == "RECORD" && !g_scanning.load(std::memory_order_relaxed)
                                      && !g_recording.load(std::memory_order_relaxed)) {
                 g_recording.store(true, std::memory_order_release);
-                
-                // --- THE FIX ---
-                // Extract 'ts' from the json BEFORE starting the thread!
-                long long ts = json.has("timestamp") ? json["timestamp"].i() : (long long)std::time(nullptr);
 
                 // Now we safely pass 'targetFreq' and 'ts' into the thread
-                std::thread([targetFreq, ts]() {
+                std::thread([targetFreq]() {
                     if (!g_live_listen.load(std::memory_order_relaxed)) {
                         crow::json::wvalue hw_cmd;
                         hw_cmd["command"] = "CONFIGURE";
@@ -622,8 +618,7 @@ void commandListener() {
                     // Ensure the output directory exists
                     mkdir("/app/shared/audio", 0755);
 
-                    // Use the 'ts' variable we passed into the thread
-                    std::string filename = "/app/shared/audio/captured_" + std::to_string(ts) + ".wav";
+                    std::string filename = "/app/shared/audio/audio.wav";
                     
                     SF_INFO sfinfo;
                     std::memset(&sfinfo, 0, sizeof(sfinfo));
@@ -668,7 +663,7 @@ void commandListener() {
                     crow::json::wvalue msg;
                     msg["event"] = "record_complete";
                     msg["freq"]  = targetFreq;
-                    msg["file"]  = filename;
+                    msg["file"] = "audio.wav";
 
                     std::lock_guard<std::mutex> r_lock(g_redis_pub_mtx);
                     redisReply* r = (redisReply*)redisCommand(
@@ -838,14 +833,13 @@ void mockCommandListener() {
                 double freq = json.has("freq") ? json["freq"].d() : 0.0;
                 std::cout << "[Mock SDR] Recording " << freq << " MHz (simulated 30s)..." << std::endl;
 
-                long long ts = json.has("timestamp") ? json["timestamp"].i() : (long long)std::time(nullptr);
-                std::thread([freq, ts]() {
+                std::thread([freq]() {
                     std::this_thread::sleep_for(std::chrono::seconds(30));
 
                     crow::json::wvalue msg;
                     msg["event"] = "record_complete";
                     msg["freq"]  = freq;
-                    msg["file"] = "/app/shared/audio/captured_" + std::to_string(ts) + ".wav";
+                    msg["file"] = "audio.wav";
 
                     redisContext* pub = redisConnect("ag-redis", 6379);
                     if (pub && !pub->err) {

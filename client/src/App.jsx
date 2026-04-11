@@ -522,25 +522,14 @@ function App() {
       const freq = data.freq;
 
       if (data.event === "record_complete") {
-        
-        const generatedFilename = data.file.split('/').pop();
-        const apiAudioPath = `/api/audio/${generatedFilename}`;
-
         setScanProgress(50);
         setScanStatus("AI: Transcribing audio...");
-        updateJob(freq, { 
-            summary: "AI: Processing transcription...",
-            audioFilePath: apiAudioPath 
-        });
+        updateJob(freq, { summary: "AI: Processing transcription..." });
         
-        //Add the file property to the JSON body
         fetch(useOpenAI ? '/api/transcribe/openai' : '/api/transcribe/local', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-              freq: parseFloat(freq),
-              file: generatedFilename // <--- Pass the filename to the API!
-          }),
+          body: JSON.stringify({ freq: parseFloat(freq) }),
         });
       }
       else if (data.event === "transcription_complete") {
@@ -558,51 +547,36 @@ function App() {
         });
       }
       else if (data.event === "summary_complete") {
-        updateJob(freq, { 
-          progress: 100,
-          statusText: "Scan complete!",
-          status: "complete",
-          summary: data.summary 
-        });
+        updateJob(freq, { progress: 100, statusText: "Scan complete!", status: "complete", summary: data.summary });
 
-        // Auto-save if this station is favorited (check by finding the station)
-        // We look up the station via the stations list so we have name/id.
-        setScanJobs(prevJobs => {
-          const job = prevJobs[freq];
-          if (job) {
-            // Find matching station (might be in main list or from a scanned queue entry)
-            const station = stationsRef.current.find(s => parseFloat(s.freq) === parseFloat(freq));
-            if (station && favoritesRef.current.has(station.id)) {
-              // Fire auto-save (fire-and-forget)
-              fetch('/api/logs/save', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  freq: parseFloat(freq),
-                  time: Math.floor(Date.now() / 1000),
-                  location: "Huntsville, AL",
-                  rawT: job.rawText,
-                  summary: data.summary,
-                  channelName: station.name,
-                  audioFilePath: job.audioFilePath || `/api/audio/captured_${job.timestamp}.wav`
-                }),
-              }).then(res => {
-                if (res.ok) {
-                  console.log(`[Auto-save] Saved favorited station ${station.name}`);
-                  fetchLogs();
-                }
-              }).catch(err => console.error("Auto-save failed:", err));
-            }
-          }
-          return prevJobs;
-        });
+        const station = stationsRef.current.find(s => parseFloat(s.freq) === parseFloat(freq));
+        const isFavorited = station && favoritesRef.current.has(station.id);
+        const job = scanJobs[freq];
 
-        // Brief pause so "100% / Scan complete!" is visible, then clear the
-        // bar on this freq and release the pipeline for the next queue item.
-        setTimeout(() => {
+        const release = () => setTimeout(() => {
           updateJob(freq, { progress: 0, statusText: "" });
           setActiveScanFreq(null);
         }, 1200);
+
+        if (isFavorited && job) {
+          fetch('/api/logs/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              freq: parseFloat(freq),
+              time: Math.floor(Date.now() / 1000),
+              location: "Huntsville, AL",
+              rawT: job.rawText,
+              summary: data.summary,
+              channelName: station.name
+            }),
+          })
+          .then(res => { if (res.ok) { console.log(`[Auto-save] Saved ${station.name}`); fetchLogs(); } })
+          .catch(err => console.error("Auto-save failed:", err))
+          .finally(release);
+        } else {
+          release();
+        }
       }
     };
 
@@ -616,9 +590,6 @@ function App() {
     if (!selectedStation) return;
     enqueueStation(selectedStation);
   };
-
-    // 1. Generate the master timestamp exactly ONCE
-    const scanTimestamp = Math.floor(Date.now() / 1000);
 
   const enqueueStation = (station) => {
     setScanQueue(prev => {
@@ -671,7 +642,6 @@ function App() {
       statusText: `Connecting to ${Number(targetFreq).toFixed(3)} MHz...`,
       summary: "Hardware: Recording 30-second capture...",
       rawText: `Capturing audio from ${Number(targetFreq).toFixed(3)} MHz...`,
-      timestamp: scanTimestamp // <--- MUST BE HERE
     });
 
     try {
@@ -683,7 +653,6 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           freq: parseFloat(targetFreq),
-          timestamp: scanTimestamp // <--- MISSING LINK ADDED HERE
         })
       });
 
@@ -764,8 +733,7 @@ function App() {
           location: "Huntsville, AL", 
           rawT: jobData.rawText,       
           summary: jobData.summary,    
-          channelName: selectedStation.name,
-          audioFilePath: jobData.audioFilePath || `/api/audio/captured_${jobData.timestamp}.wav`        }),
+          channelName: selectedStation.name,}),
       });
 
       if (response.ok) {

@@ -7,6 +7,7 @@
 #include <curl/curl.h>
 #include <fstream>
 #include <sstream>
+#include <cstdio>
 
 #include "dbcorefunctions.hpp"
 #include "dbcorefilter.hpp"
@@ -537,15 +538,26 @@ CROW_ROUTE(app, "/api/search")
         std::string rawT = body["rawT"].s();
         std::string summary = body["summary"].s();
         std::string channelName = body["channelName"].s();
-        
-        // --- THE C++ TYPING FIX ---
-        // Explicitly cast both sides to std::string so the compiler is happy
-        // DANIEL FIX ME ! 
-        std::string audioFilePath = body.has("audioFilePath") 
-            ? std::string(body["audioFilePath"].s()) 
-            : std::string("/api/audio/captured_" + std::to_string(time) + ".wav");
 
-        insertLog(freq, time, location, rawT, summary, channelName, audioFilePath);  
+        std::string src = "/app/shared/audio/audio.wav";
+        std::string dst = "/app/shared/audio/captured_" + std::to_string(time) + ".wav";
+        std::string audioFilePath = "/api/audio/captured_" + std::to_string(time) + ".wav";
+
+        std::ifstream srcFile(src, std::ios::binary);
+        std::ofstream dstFile(dst, std::ios::binary);
+
+        if (!srcFile.good() || !dstFile.good()) {
+            std::cerr << "[Save] Failed to copy audio.wav to " << dst 
+                    << " — saving row with scratch path" << std::endl;
+            audioFilePath = "/api/audio/audio.wav";
+        } else {
+            dstFile << srcFile.rdbuf();
+            std::cout << "[Save] Copied audio.wav -> " << dst << std::endl;
+        }
+        srcFile.close();
+        dstFile.close();
+
+        insertLog(freq, time, location, rawT, summary, channelName, audioFilePath);
               
         return makeCorsResponse({{"status", "success"}});
     });
