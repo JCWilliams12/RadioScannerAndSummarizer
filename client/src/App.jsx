@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import './App.css'
 import AetherGuardLogo from './assets/AetherGuardLogo.png'
+import FilterIcon from './assets/filterLogo.png'
+import CloseIcon from './assets/closeLogo.svg'
 import { motion, AnimatePresence } from "framer-motion"
 
 // Progress bar keyframes
@@ -864,29 +866,33 @@ function App() {
                 <h3 style={{ margin: 0, borderBottom: 'none' }}>Saved Logs</h3>
                 <button 
                   onClick={() => setShowFilters(!showFilters)}
-                  style={{ backgroundColor: 'transparent', color: '#8cb4d5', border: '1px solid #004080', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85em' }}
+                  style={{ backgroundColor: 'transparent', cursor: 'pointer', padding : 0, display: 'flex', alignItems: 'center', }}
                 >
-                  {showFilters ? 'Hide Filters ▲' : 'Advanced Filters ▼'}
+                 <img
+                 src={showFilters ? CloseIcon : FilterIcon}
+                 alt={showFilters ? 'Close Filter' : 'Open Filters'}
+                 style={{ width : '22px', height : '22px'}}
+                 />
                 </button>
               </div>
 
               {/* ADVANCED FILTER PANEL */}
               {showFilters && (
-                <div style={{ backgroundColor: 'rgba(0,0,0,0.2)', padding: '10px', borderRadius: '6px', marginBottom: '15px', display: 'flex', flexDirection: 'column', gap: '8px', border: '1px solid #002b5e' }}>
+                <div className ="filter-box" style={{ backgroundColor: '#e6f0fa', borderRadius: '6px', marginBottom: '15px', display: 'flex', flexDirection: 'column', gap: '8px'}}>
                   <input type="text" placeholder="Keyword (Search AI & Transcripts)" className="search-input" value={filterKeyword} onChange={(e) => setFilterKeyword(e.target.value)} />
                   
-                  <div style={{ display: 'flex', gap: '8px' }}>
+                  <div className = "filter-input" style={{ display: 'flex', gap: '8px' }}>
                     <input type="number" placeholder="Freq (MHz)" className="search-input" style={{ flex: 1 }} value={filterFreq} onChange={(e) => setFilterFreq(e.target.value)} />
                     <input type="text" placeholder="Location" className="search-input" style={{ flex: 1 }} value={filterLoc} onChange={(e) => setFilterLoc(e.target.value)} />
                   </div>
                   
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center'}}>
                     <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
-                      <label style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '2px' }}>Start Time</label>
+                      <label style={{ fontSize: '0.75em', color: '#000000', marginBottom: '2px' }}>Start Time</label>
                       <input type="datetime-local" className="search-input" value={filterStart} onChange={(e) => setFilterStart(e.target.value)} />
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
-                      <label style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '2px' }}>End Time</label>
+                      <label style={{ fontSize: '0.75em', color: '#000000', marginBottom: '2px' }}>End Time</label>
                       <input type="datetime-local" className="search-input" value={filterEnd} onChange={(e) => setFilterEnd(e.target.value)} />
                     </div>
                   </div>
@@ -1048,62 +1054,70 @@ function App() {
 
       {/* FLOATING AGENT WIDGET */}
       {view === 'database' && (
-        <div style={{
-          position: 'fixed', bottom: '20px', right: '20px', width: '350px',
-          backgroundColor: '#001a33', border: '1px solid #004080', borderRadius: '8px',
-          boxShadow: '0 8px 16px rgba(0,0,0,0.5)', zIndex: 1000,
-          display: 'flex', flexDirection: 'column', overflow: 'hidden'
-        }}>
-          {/* Header (Click to toggle) */}
-          <div 
-            onClick={() => setIsAgentOpen(!isAgentOpen)}
-            style={{ padding: '10px 15px', backgroundColor: '#002b5e', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 'bold' }}
-          >
-            <span>AetherGuard Agent</span>
-            <span>{isAgentOpen ? '▼' : '▲'}</span>
-          </div>
-
-          {/* Body */}
-          {isAgentOpen && (
-            <div style={{ height: '350px', display: 'flex', flexDirection: 'column' }}>
-              {!useOpenAI ? (
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8cb4d5', padding: '20px', textAlign: 'center' }}>
-                  Database agent disabled for local model. Switch to OpenAI to enable.
-                </div>
-              ) : (
-                <>
-                  <div style={{ flex: 1, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                    {agentMessages.length === 0 && (
-                      <div style={{ color: '#5a8aad', fontSize: '0.85em', textAlign: 'center' }}>Ask me about the database records.</div>
-                    )}
-                    {agentMessages.map((msg, idx) => (
-                      <div key={idx} style={{ alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', backgroundColor: msg.role === 'user' ? '#004080' : 'rgba(255,255,255,0.05)', padding: '8px 12px', borderRadius: '6px', maxWidth: '85%', fontSize: '0.9em', color: 'white' }}>
-                        {msg.content}
-                      </div>
-                    ))}
-                    {isAgentThinking && (
-                      <div style={{ alignSelf: 'flex-start', color: '#8cb4d5', fontSize: '0.85em', fontStyle: 'italic' }}>Agent is thinking...</div>
-                    )}
-                  </div>
-                  <form onSubmit={handleAgentSubmit} style={{ display: 'flex', padding: '10px', borderTop: '1px solid #004080', backgroundColor: 'rgba(0,0,0,0.2)' }}>
-                    <input 
-                      type="text" 
-                      value={agentInput} 
-                      onChange={(e) => setAgentInput(e.target.value)} 
-                      placeholder="Search the logs..." 
-                      style={{ flex: 1, padding: '8px', borderRadius: '4px', border: '1px solid #333', backgroundColor: '#001a33', color: 'white' }}
-                      disabled={isAgentThinking}
-                    />
-                    <button type="submit" disabled={isAgentThinking} style={{ marginLeft: '8px', padding: '8px 12px', backgroundColor: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: isAgentThinking ? 'not-allowed' : 'pointer' }}>
-                      Send
-                    </button>
-                  </form>
-                </>
-              )}
+        <div className="agent-widget">
+          <div style={{
+            position: 'fixed', bottom: '20px', right: '20px', width: '350px',
+            backgroundColor: '#ffffff', border: '1px solid #ced4da', borderRadius: '8px',
+            display: 'flex', flexDirection: 'column', overflow: 'hidden'
+          }}>
+            {/* Header (Click to toggle) */}
+            <div 
+              onClick={() => setIsAgentOpen(!isAgentOpen)}
+              style={{ padding: '10px 15px', backgroundColor: '#ced4da', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 'bold' }}
+            >
+              <span>AetherGuard Agent</span>
+              <span>{isAgentOpen ? '▼' : '▲'}</span>
             </div>
-          )}
+
+            {/* Body */}
+            {isAgentOpen && (
+              <div style={{ height: '350px', display: 'flex', flexDirection: 'column' }}>
+                {!useOpenAI ? (
+                  <div style={{ flex: 1, display: 'flex', color: '#8cb4d5', padding: '20px' }}>
+                    Database agent disabled for local model. Switch to OpenAI to enable.
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ flex: 1, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px', alignItems: 'flex-start'}}>
+                      {agentMessages.length === 0 && (
+                        <div style={{ color: '#5a8aad', fontSize: '0.85em'}}>Ask me about the database records.</div>
+                      )}
+                      {agentMessages.map((msg, idx) => (
+                        <div key={idx} style={{ alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', 
+                        backgroundColor: msg.role === 'user' ? '#004080' : '#3b82f6', 
+                        padding: '8px 12px', 
+                        borderRadius: '6px', 
+                        maxWidth: '85%', 
+                        fontSize: '0.9em', 
+                        color: 'white', 
+                        textAlign: msg.role === 'user' ? 'right' : 'left' }}>
+                          {msg.content}
+                        </div>
+                      ))}
+                      {isAgentThinking && (
+                        <div style={{ alignSelf: 'flex-start', color: '#8cb4d5', fontSize: '0.85em', fontStyle: 'italic' }}>Agent is thinking...</div>
+                      )}
+                    </div>
+                    <form onSubmit={handleAgentSubmit} style={{ display: 'flex', padding: '10px', borderTop: '1px solid #004080', backgroundColor: '#ced4da' }}>
+                      <input 
+                        type="text" 
+                        value={agentInput} 
+                        onChange={(e) => setAgentInput(e.target.value)} 
+                        placeholder="Search the logs..." 
+                        style={{ flex: 1, padding: '8px', borderRadius: '4px', border: '1px solid #ced4da', backgroundColor: '#ffffff', color: 'black' }}
+                        disabled={isAgentThinking}
+                      />
+                      <button type="submit" disabled={isAgentThinking} style={{ marginLeft: '8px', padding: '8px 12px', backgroundColor: '#004080', color: 'white', border: 'none', borderRadius: '4px', cursor: isAgentThinking ? 'not-allowed' : 'pointer' }}>
+                        Send
+                      </button>
+                    </form>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
-      )}
+        )}
 
  {/* SCANNING VIEW */}
       {view === 'scanning' && (

@@ -10,7 +10,7 @@ or
 
 
 Mac/Linux:
-./start
+./start.sh
 (can boot into mock mode automatically upon not detcting SDR unit)
 !!! USE "./start.sh stop" TO CLOSE CLEANY !!!
 

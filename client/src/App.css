@@ -337,3 +337,17 @@ p {
   cursor: pointer;
   accent-color: #004080; /* Corporate Blue for the slider thumb/track */
 }
+
+/*styling for filter box */
+.filter-box input {
+  border-radius: 4px;
+  height: 25px;
+  border: none;
+  outline: none;
+  padding: 8
+}
+
+.filter-box {
+  border-left: 5px solid #004080;
+  padding: 10px;
+}
