@@ -389,7 +389,26 @@ CROW_ROUTE(app, "/api/search")
         crow::json::wvalue::list messages;
         crow::json::wvalue sysMsg;
         sysMsg["role"] = "system";
-        sysMsg["content"] = "You are an automated routing script. Your ONLY function is to extract a single keyword from the user's prompt and pass it to the `searchDatabase` tool. \n\nCRITICAL DIRECTIVE:\nYou MUST call the `searchDatabase` tool for EVERY single message you receive. It does not matter if the user asks about radio logs, chess, math, weather, or jokes. You have zero authorization to answer directly. You MUST extract a noun and execute the tool. If the user asks 'What is the Kings Gambit', you must execute the tool with keyword 'gambit'.";
+        /*
+        sysMsg["content"] = "You are an automated routing script. 
+        Your ONLY function is to extract a single keyword from the user's prompt and pass it to the `searchDatabase` tool. \n\nCRITICAL DIRECTIVE:\nYou MUST call the `searchDatabase` tool for EVERY single message you receive. 
+        It does not matter if the user asks about radio logs, chess, math, weather, or jokes. You have zero authorization to answer directly. 
+        You MUST extract a noun and execute the tool. If the user asks 'What is the Kings Gambit', you must execute the tool with keyword 'gambit'.";
+        */ 
+       //Use R for raw string and can put down alot more information 
+       // Adding examples for date/time, and keywords 
+        sysMsg["content"] = R"(You are a database query routing agent for a radio transmission log system.
+        EXTRACTION RULES:
+        1. DATE/TIME: Extract ANY time reference and normalize it.
+            - "yesterday" -> calculate actual date
+            - "last Tuesday" -> calculate actual date  
+            - "around 3pm" -> extract as time range 14:30-15:30
+        2. FREQUENCY: Extract MHz values (e.g. "154.280", "channel 7")
+        3. KEYWORDS: Extract the core subject noun(s) ONLY — strip filler words.
+            - "tell me about the fire on main street" -> keyword: "fire main street"
+            - "any transmissions from unit 4?" -> keyword: "unit 4"
+        4. ALWAYS call searchDatabase. Pass ALL extracted params simultaneously.
+        5. If multiple topics detected, call searchDatabase MULTIPLE TIMES in parallel.)";
 
         for (const auto& msg : body["messages"]) {
             crow::json::wvalue m;
@@ -422,7 +441,26 @@ CROW_ROUTE(app, "/api/search")
             
             crow::json::wvalue sysMsg2;
             sysMsg2["role"] = "system";
-            sysMsg2["content"] = "You are a strict database reporter. You are looking at the results of a database query.\n\nCRITICAL DIRECTIVE:\n1. If the tool returned logs: Summarize them accurately.\n2. If the tool returned 'No results found.': You MUST reply EXACTLY with 'This query is outside my operational scope. I can only provide intelligence based on intercepted radio logs.'\n3. You are FORBIDDEN from adding conversational filler, apologies, or pre-trained knowledge. If the database is empty, the exact string above is your ONLY allowed output.";
+
+           /*
+            sysMsg2["content"] = "You are a strict database reporter. 
+            You are looking at the results of a database query.
+            \n\nCRITICAL DIRECTIVE:\n1. If the tool returned logs: 
+            Summarize them accurately.\n2. If the tool returned 'No results found.': You MUST reply EXACTLY with 'This query is outside my operational scope. I can only provide intelligence based on intercepted radio logs.'\n3. 
+            You are FORBIDDEN from adding conversational filler, apologies, or pre-trained knowledge. 
+            If the database is empty, the exact string above is your ONLY allowed output.";
+            */
+           // sysMsg2["content"] = "You are a strict database reporter. You are looking at the results of the database query.\n\nCRITICAL DIRECTIVE:\n1. DATA PRESENT: If the tool returns logs, extract and present all relevant findings completely. Do not summarize or omit details.\n2. DATA EMPTY: If the tool returns an empty array, null, or 'no results', you MUST reply EXACTLY with 'This query is outside my operational scope. I can only provide intelligence based on intercepted radio logs.'\n3. FORMATTING: You are FORBIDDEN from adding conversational filler, apologies, or pre-trained knowledge. If the database is empty, the exact string above is your ONLY allowed output.";
+            sysMsg2["content"] = R"(You are a radio log analyst. The database has returned results below.
+
+            OUTPUT RULES:
+            1. HITS: Format each record as:
+                [TIMESTAMP] [FREQ] [STATION] — Summary: <summary>
+                Raw: <raw transcript if available>
+            2. NO HITS: Reply ONLY with:
+                "No matching transmissions found for that query."
+            3. NEVER add information not present in the returned records.
+            4. NEVER reference your training data. The database is your ONLY source.)";
 
             for (const auto& msg : body["messages"]) {
                 crow::json::wvalue m;
