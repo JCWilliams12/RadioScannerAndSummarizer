@@ -260,6 +260,9 @@ function App() {
   useEffect(() => { stationsRef.current = stations; }, [stations]);
   useEffect(() => { favoritesRef.current = favorites; }, [favorites]);
 
+  const scanJobsRef = useRef({});
+  useEffect(() => { scanJobsRef.current = scanJobs; }, [scanJobs]);
+
   const fetchLogs = async () => {
     try {
       const res = await fetch('/api/logs'); 
@@ -553,7 +556,7 @@ function App() {
 
         const station = stationsRef.current.find(s => parseFloat(s.freq) === parseFloat(freq));
         const isFavorited = station && favoritesRef.current.has(station.id);
-        const job = scanJobs[freq];
+        const job = scanJobsRef.current[freq];
 
         const release = () => setTimeout(() => {
           updateJob(freq, { progress: 0, statusText: "" });
@@ -905,7 +908,7 @@ function App() {
                   </div>
                 </div>
               )}
-              <ul className="frequency-list">
+              <ul className="frequency-list" style={{ height: '400px', overflowY: 'auto', marginTop: 0, paddingLeft: 0, paddingRight: '5px', listStyle: 'none' }}>
                 {logs.map(log => (
                   <li 
                     key={`${log.freq}-${log.time}`}
